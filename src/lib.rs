@@ -1,32 +1,107 @@
-//! # Fuzzy's Funny Zero-cost Vulkan abstraction.
-//! Typestate :3
+//! # Fuzzy's Funny Zero-cost Excessively-Typestate Vulkan Abstraction
+//! A thin wrapper around [`ash`]. This crate is not associated with the ash project!
 //!
-//! To get started, use [`ash`] to fetch a [`ash::Device`] and pass it to [`Device::from_ash`].
+//! To get started, fetch an [`ash::Device`] and pass it to [`Device::from_ash`].
 //!
-//! ## External Synchronization
-//! This crate maps objects to *ownership* of the underlying handle. With this abstraction, a function
-//! taking mutable reference to a handle or accepting a handle by value can assume it is the only thread
-//! with access to the handle.
+//! ## Typestate
+//! This crate makes extensive (perhaps excessive) use of the
+//! [typestate pattern](https://en.wikipedia.org/wiki/Typestate_analysis) to validate *some* operations.
+//! Of course, the scope of what can be declared at compile time is inherently limited by the need for
+//! runtime flexibility, so it is mostly used in locations where it is a common usage pattern that the
+//! "shape" of the data will not be totally dynamic.
+//!
+//! For example, an [`Image`] contains the following compile-time information:
+//! * Whether it is a Color or Depth/Stencil Aspect image.
+//! * Its dimensionality (1D, 2D, 3D)
+//! * Its array-ness
+//! * Its vkImageUsageFlags
+//! * Whether multisampling is in use.
+//!
+//! A fully-named image type thus looks something like:
+//! ```no_run
+//! # use fzvk::*;
+//! let image : Image<(Storage, TransferDst), D2Array, ColorFormat, SingleSampled> = todo!();
+//! ```
+//! Since each of these facts are almost always known at compile time and have large implications
+//! for valid usage of the resource, they are tracked at compile time too.
+//!
+//! This allows for functions to validate, at compile time, whether certain aspects of the operation
+//! are valid and produce a compiler error if the state of an object is not statically known to be correct.
+//! See [`Device::bind_vertex_buffers`] for what that looks like.
+//!
+//! ### What if it *needs* to be dynamic?
+//! If there is a finite enumeration of dynamic states, `enum`s or even `union`s around the possible
+//! typestates are good choices.
+//!
+//! For states too dynamic even for that strategy, raw vulkan may be used.
+//! Since this crate is a thin wrapper around [`ash`], it is perfectly valid to mix and match API
+//! calls from both. See the [`ThinHandle`] trait for how to move data in and out of the typestate
+//! ecosystem and the safety considerations of this.
+//!
+//! ## Zero cost
+//! * Types do not contain any runtime state beyond their vulkan handles.
+//!   * Typestate "data" is zero-sized and compiles down to nothing at all
+//!   * Handles do not contain the necessary function pointers, thus all operations must go through
+//!     the central [`Device`] type.
+//!   * The big exception to this is [`Device`], which contains several kilobytes of function pointers
+//!     on the stack. We can't all be winners :3
+//! * Allocations are avoided like the plague.
+//!   * Wherever possible, const-generic arrays are used instead to make variable-length operations
+//!     occur exclusively on the stack.
+//! * Vulkan functions are only called when explicity issued by the user, or when
+//!   unambiguously implied at compile time.
+//!   * *Handles do not implement Drop*
+//!
+//! ## Errors
+//! All vulkan runtime errors (Device lost, out-of-memory, etc.), with the exception of "expected" errors
+//! like `ERROR_TIMEOUT` or s`ERROR_NOT_READY`, are assumed to be fatal to the library.
+//! While this will not result in panics or undefined behavior, it may result in resource leaks. Fixme!
 //!
 //! ## Safety
+//! While this crate attempts to validate some subset of the vulkan correct-usage rules, it does not
+//! (and *can not*) validate everything. Vulkan is still a deeply unsafe API with many opportunities for
+//! incorrect usage to result in undefined behavior.
+//!
 //! Functions that take multiple objects must have the correct ownership hierarchies
 //! (e.g. the parameters passed to [`Device::begin_command_buffer`] should be a command buffer,
-//! the command pool from which it is allocated, and the device they both belong to.)
+//! the command pool from which it is allocated, and the device they both belong to.) This crate
+//! takes advantange of this fact for additional compile-time checks, such as *external synchronization*.
+//!
+//! ### External Synchronization
+//! This crate maps objects (Like [`Buffer`], [`Fence`], etc.) to *ownership* of the underlying handle.
+//! With this abstraction, a function taking mutable reference to a handle or accepting a handle by
+//! value can assume it is the only thread with access to the handle.
 //!
 //! ## Todo:
 //! * [ ] Renderpasses
+//!   * [ ] Dynamic Rendering
+//!   * [ ] Framebuffers
 //! * [ ] Swapchains
 //! * [ ] Pipelines
-//! * [ ] Framebuffers
-//! * [ ] Modules
-//! * [ ] Descriptors
+//!   * [ ] Layout
+//!   * [ ] Graphics
+//!   * [ ] Compute
+//!   * [X] Modules
+//!     * [X] Specialization
+//!       * [ ] Okay but do it better
+//!   * [ ] Cache
+//! * [ ] Sync primitives
+//!   * [X] Fences
+//!   * [ ] Semaphores
+//!   * [ ] Events
+//! * [ ] Descriptor
+//!   * [ ] Layout
+//!   * [ ] Pool
+//!   * [ ] Set
 //! * [ ] Memory
+//!   * [ ] Host accessible
+//! * [ ] Use NonNull NON_DISPATCHABLE_HANDLEs
 
 // #![warn(missing_docs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(generic_const_exprs)]
 #![allow(clippy::missing_safety_doc)]
-use ash::vk;
+use ash::vk::{self, Handle};
 use std::{marker::PhantomData, num::NonZero};
 
 #[derive(Clone, Copy)]
@@ -156,6 +231,15 @@ pub enum AllocationError {
     /// The implementation could not allocate enough device memory.
     OutOfDeviceMemory = vk::Result::ERROR_OUT_OF_DEVICE_MEMORY.as_raw(),
 }
+impl std::error::Error for AllocationError {}
+impl std::fmt::Display for AllocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfHostMemory => write!(f, "out of host memory"),
+            Self::OutOfDeviceMemory => write!(f, "out of device memory"),
+        }
+    }
+}
 impl AllocationError {
     /// Convert from a vulkan result code.
     /// Must be one of `ERROR_OUT_OF_HOST_MEMORY` or `ERROR_OUT_OF_DEVICE_MEMORY` otherwise
@@ -256,7 +340,8 @@ pub unsafe trait ThinHandle: Sized {
     }
     /// Create an object from the relavant handle.
     /// # Safety
-    /// The handle must be in a state consistent with the typestate of `Self`
+    /// * The handle must be in a state consistent with the typestate of `Self`
+    /// * The handle must not be `VK_NULL_HANDLE`
     unsafe fn from_handle(handle: Self::Handle) -> Self {
         // Manual transmute since the sizes aren't known.
         debug_assert_eq!(
@@ -302,7 +387,6 @@ pub unsafe trait ThinHandle: Sized {
         std::mem::transmute(self)
     }
 }
-
 macro_rules! access_combinations {
     {impl $trait_name:ident for [$(($($name:ident),*$(,)?)),+$(,)?] {
         const $const_name:ident: $const_ty:ty;
@@ -471,7 +555,31 @@ pub unsafe trait Extent {
     /// The number of layers, or 1 if not a layered type.
     fn layers(&self) -> NonZero<u32>;
 }
+/// A trait representing an offset of an image of various dimensionalities.
+pub trait Offset {
+    /// The value represeting the `(0, 0, 0)` point.
+    const ORIGIN: Self;
+    /// The dimensionality of the extent represented by this type.
+    /// For example, 2D Array has dimensionality 2.
+    type Dim: Dimensionality;
+    /// The extrapolated extent3D.
+    /// All dimensions must be non-zero. Axes beyond the type's dimensionality should be `1`.
+    fn offset(&self) -> vk::Offset3D;
+}
+pub struct Offset1D(pub i32);
+impl Offset for Offset1D {
+    const ORIGIN: Self = Self(0);
+    type Dim = D1;
+    fn offset(&self) -> vk::Offset3D {
+        vk::Offset3D {
+            x: self.0,
+            y: 0,
+            z: 0,
+        }
+    }
+}
 /// The width of a 1-dimensional image.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Extent1D(pub NonZero<u32>);
 unsafe impl Extent for Extent1D {
     type Dim = D1;
@@ -489,7 +597,7 @@ unsafe impl Extent for Extent1D {
 /// The width and layers of a 1-dimensional array image.
 pub struct Extent1DArray {
     pub width: NonZero<u32>,
-    pub layers: NonZero<u32>,
+    pub layers: ArrayCount,
 }
 unsafe impl Extent for Extent1DArray {
     type Dim = D1Array;
@@ -501,14 +609,39 @@ unsafe impl Extent for Extent1DArray {
         }
     }
     fn layers(&self) -> NonZero<u32> {
-        self.layers
+        self.layers.as_nonzero()
     }
 }
 /// The width and height of a 2-dimensional array image.
 pub struct Extent2DArray {
     pub width: NonZero<u32>,
     pub height: NonZero<u32>,
-    pub layers: NonZero<u32>,
+    pub layers: ArrayCount,
+}
+impl Extent2D {
+    pub fn with_layers(self, layers: ArrayCount) -> Extent2DArray {
+        Extent2DArray {
+            width: self.width,
+            height: self.height,
+            layers,
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Offset2D {
+    x: i32,
+    y: i32,
+}
+impl Offset for Offset2D {
+    const ORIGIN: Self = Self { x: 0, y: 0 };
+    type Dim = D2;
+    fn offset(&self) -> vk::Offset3D {
+        vk::Offset3D {
+            x: self.x,
+            y: self.y,
+            z: 0,
+        }
+    }
 }
 unsafe impl Extent for Extent2DArray {
     type Dim = D2Array;
@@ -520,10 +653,11 @@ unsafe impl Extent for Extent2DArray {
         }
     }
     fn layers(&self) -> NonZero<u32> {
-        self.layers
+        self.layers.as_nonzero()
     }
 }
 /// The width and height of a 2-dimensional image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Extent2D {
     pub width: NonZero<u32>,
     pub height: NonZero<u32>,
@@ -560,11 +694,138 @@ unsafe impl Extent for Extent3D {
         NonZero::new(1).unwrap()
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Offset3D {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+impl Offset for Offset3D {
+    const ORIGIN: Self = Self { x: 0, y: 0, z: 0 };
+    type Dim = D3;
+    fn offset(&self) -> vk::Offset3D {
+        vk::Offset3D {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+/// The number of images in an array, two or greater.
+///
+/// In vulkan, the only difference between an image and an array image is
+/// whether it is created with an array count > 1.
+pub struct ArrayCount(NonZero<u32>);
+impl ArrayCount {
+    /// Create an array count, >= 2 None if an invalid count.
+    pub fn new(layers: u32) -> Option<Self> {
+        if layers >= 2 {
+            // Safety - just checked.
+            Some(unsafe { Self::new_unchecked(layers) })
+        } else {
+            None
+        }
+    }
+    /// Create an array count without bounds checking.
+    /// # Safety
+    /// `layers` must be `>= 2`
+    pub unsafe fn new_unchecked(layers: u32) -> Self {
+        debug_assert!(layers >= 2);
+        Self(NonZero::new_unchecked(layers))
+    }
+    /// Get the number of layers with guarantee that it is nonzero.
+    pub fn as_nonzero(self) -> NonZero<u32> {
+        self.0
+    }
+    /// Get the number of layers as an integer.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+#[repr(u32)]
+pub enum Aspect {
+    Color = vk::ImageAspectFlags::COLOR.as_raw(),
+    Depth = vk::ImageAspectFlags::DEPTH.as_raw(),
+    Stencil = vk::ImageAspectFlags::STENCIL.as_raw(),
+}
 /// The number of dimensions in an image, including whether it's an array.
 pub trait Dimensionality {
     type Extent: Extent;
+    type SubresourceLayers: SubresourceLayers;
+    type Offset: Offset;
+    type Pitch: BufferPitch;
+    //type Offset: Offset;
+    //type SubresourceRange: Range,
     const TYPE: vk::ImageType;
 }
+/// The data needed for addressing calculations in buffer-image copies.
+pub trait BufferPitch {
+    /// The value representing that the vulkan implementation should assume tight
+    /// packing between rows and slices, i.e. where [`BufferPitch::row_pitch`] and
+    /// [`BufferPitch::slice_pitch`] are both `None`.
+    const PACKED: Self;
+    fn row_pitch(&self) -> Option<NonZero<u32>>;
+    fn slice_pitch(&self) -> Option<NonZero<u32>>;
+}
+/// Controls buffer addressing for image operations where only one 2D image slice is involved.
+///
+/// The distance in *texels* (not bytes!) between the start of one row and the start
+/// of the next, or `None` for tight packing (i.e. the `width` of the image)
+///
+/// If not None, must be >= the tight packed pitch (rows must not alias, even for
+/// a read-only operation)
+pub struct RowPitch(pub Option<NonZero<u32>>);
+/// Controls buffer addressing for image operations where several 2D image slices are involved.
+pub struct RowSlicePitch {
+    /// The distance in *texels* (not bytes!) between the start of one row and the start
+    /// of the next, or `None` for tight packing (i.e. the `width` of the image)
+    ///
+    /// If not None, must be >= the tight packed pitch (rows must not alias, even for
+    /// a read-only operation)
+    pub row_pitch: Option<NonZero<u32>>,
+    /// The distance in *texels* (not bytes!) between the start of one 2D slice of a 3D image or 2D array image
+    /// and the start of the next, or `None` for tight packing (i.e. the `width * height` of the image)
+    ///
+    /// If not None, must be >= the tight packed pitch (slices must not alias, even for
+    /// a read-only operation)
+    pub slice_pitch: Option<NonZero<u32>>,
+}
+
+/// Buffer addressing for D1 images cannot be controlled.
+impl BufferPitch for () {
+    const PACKED: Self = ();
+    fn row_pitch(&self) -> Option<NonZero<u32>> {
+        None
+    }
+    fn slice_pitch(&self) -> Option<NonZero<u32>> {
+        None
+    }
+}
+impl BufferPitch for RowPitch {
+    const PACKED: Self = Self(None);
+    fn row_pitch(&self) -> Option<NonZero<u32>> {
+        self.0
+    }
+    fn slice_pitch(&self) -> Option<NonZero<u32>> {
+        None
+    }
+}
+impl BufferPitch for RowSlicePitch {
+    const PACKED: Self = Self {
+        row_pitch: None,
+        slice_pitch: None,
+    };
+    fn row_pitch(&self) -> Option<NonZero<u32>> {
+        self.row_pitch
+    }
+    fn slice_pitch(&self) -> Option<NonZero<u32>> {
+        self.slice_pitch
+    }
+}
+pub struct BufferPitchD3;
 /// Typestate for a 1-dimensional image.
 pub struct D1;
 /// Typestate for a 1-dimensional array image.
@@ -577,24 +838,115 @@ pub struct D2Array;
 pub struct D3;
 impl Dimensionality for D1 {
     type Extent = Extent1D;
+    type Offset = Offset1D;
+    type Pitch = ();
+    type SubresourceLayers = SubresourceMip;
     const TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
 }
 impl Dimensionality for D1Array {
     type Extent = Extent1DArray;
+    type Offset = Offset1D;
+    type Pitch = RowPitch;
+    type SubresourceLayers = SubresourceMipArray;
     const TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
 }
 impl Dimensionality for D2 {
     type Extent = Extent2D;
+    type Offset = Offset2D;
+    type Pitch = RowPitch;
+    type SubresourceLayers = SubresourceMip;
     const TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
 }
 impl Dimensionality for D2Array {
     type Extent = Extent2DArray;
+    type Offset = Offset2D;
+    type Pitch = RowSlicePitch;
+    type SubresourceLayers = SubresourceMipArray;
     const TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
 }
 impl Dimensionality for D3 {
     type Extent = Extent3D;
+    type Offset = Offset3D;
+    type Pitch = RowSlicePitch;
+    type SubresourceLayers = SubresourceMip;
     const TYPE: vk::ImageType = vk::ImageType::TYPE_3D;
 }
+pub trait SubresourceLayers {
+    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers;
+}
+/// A single mip level of a non-array image.
+pub struct SubresourceMip(pub u32);
+impl SubresourceMip {
+    pub const ZERO: Self = Self(0);
+}
+impl SubresourceLayers for SubresourceMip {
+    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers {
+        vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::from_raw(aspect as _),
+            mip_level: self.0,
+            base_array_layer: 0,
+            layer_count: 1,
+        }
+    }
+}
+/// A single mip level of a range of image layers.
+pub struct SubresourceMipArray {
+    mip: u32,
+    start_layer: u32,
+    layer_count: NonZero<u32>,
+}
+impl SubresourceMipArray {
+    /// Reference a span of layers at a given mip level.
+    ///
+    /// If a range is specified without an end, e.g. `0..`, `VK_REMAINING_LAYERS`
+    /// is specified.
+    /// # Panics
+    /// If layers is an inverted or empty range.
+    pub fn new(mip: u32, layers: impl std::ops::RangeBounds<u32>) -> Self {
+        let start_layer = match layers.start_bound() {
+            std::ops::Bound::Excluded(&a) => a.checked_add(1).unwrap(),
+            std::ops::Bound::Included(&a) => a,
+            std::ops::Bound::Unbounded => 0,
+        };
+        let layer_count = match layers.end_bound() {
+            std::ops::Bound::Excluded(&end) => {
+                assert!(start_layer < end);
+                // Safety - just checked that end is strictly larger, therefore a difference >= 1.
+                unsafe { NonZero::new_unchecked(end - start_layer) }
+            }
+            std::ops::Bound::Included(&end) => {
+                assert!(start_layer <= end);
+                let count = (end - start_layer)
+                    .checked_add(1)
+                    .expect("overflow in SubresourceMipArray::new");
+                // Unconditional +1, always nonzero.
+                unsafe { NonZero::new_unchecked(count) }
+            }
+            std::ops::Bound::Unbounded => NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap(),
+        };
+        Self {
+            mip,
+            start_layer,
+            layer_count,
+        }
+    }
+}
+impl SubresourceLayers for SubresourceMipArray {
+    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers {
+        vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::from_raw(aspect as _),
+            mip_level: self.mip,
+            base_array_layer: self.start_layer,
+            layer_count: self.layer_count.get(),
+        }
+    }
+}
+/*
+pub trait ResourceRange {
+    fn subresource_range(&self) -> vk::ImageSubresourceRange;
+}
+pub struct SubresourceRange(pub std::ops::Range<u32>);
+pub struct LayeredSubresourceRange{pub mips: std::ops::Range<u32>, pub layers: std::ops::Range<u32>}*/
 
 /// A value representing an image's pixel format.
 pub trait ImageFormat {
@@ -606,6 +958,8 @@ pub trait ImageFormat {
 pub enum ColorFormat {
     Rgba8Unorm = vk::Format::R8G8B8A8_UNORM.as_raw(),
     Rgba8Srgb = vk::Format::R8G8B8A8_SRGB.as_raw(),
+    R8Unorm = vk::Format::R8_UNORM.as_raw(),
+    Rg8Uint = vk::Format::R8G8_UINT.as_raw(),
 }
 impl ImageFormat for ColorFormat {
     fn format(&self) -> vk::Format {
@@ -621,19 +975,52 @@ impl ImageFormat for DepthStencilFormat {
     }
 }
 
+pub unsafe trait ImageSamples {
+    fn flag(self) -> vk::SampleCountFlags;
+}
+#[derive(Clone, Copy)]
+/// Typestate for an image which has one sample per pixel.
+/// See also [`MultiSampled`].
+pub struct SingleSampled;
+unsafe impl ImageSamples for SingleSampled {
+    fn flag(self) -> vk::SampleCountFlags {
+        vk::SampleCountFlags::TYPE_1
+    }
+}
+/// Typestate for an image which has more than one sample.
+/// See also [`SingleSampled`].
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum MultiSampled {
+    Samples2 = vk::SampleCountFlags::TYPE_2.as_raw(),
+    Samples4 = vk::SampleCountFlags::TYPE_4.as_raw(),
+    Samples8 = vk::SampleCountFlags::TYPE_8.as_raw(),
+    Samples16 = vk::SampleCountFlags::TYPE_16.as_raw(),
+    Samples32 = vk::SampleCountFlags::TYPE_32.as_raw(),
+    Samples64 = vk::SampleCountFlags::TYPE_64.as_raw(),
+}
+unsafe impl ImageSamples for MultiSampled {
+    fn flag(self) -> vk::SampleCountFlags {
+        vk::SampleCountFlags::from_raw(self as _)
+    }
+}
+
 /// An owned image handle.
 /// # Typestates
 /// * `Access`: The `VkImageUsageFlags` this image is statically known to possess (e.g. `(Storage, TransferSrc)`)
 /// * `Dim`: The dimensionality of an image, including whether it is an array of images (e.g. [`D2`])
 /// * `Format`: The Image aspects this image's format is known to possess (e.g. [`ColorFormat`]).
+/// * `Samples`: Whether the image is [single-](SingleSampled) or [multi-](MultiSampled)sampled.
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the image and may leak resources"]
-pub struct Image<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat>(
-    vk::Image,
-    PhantomData<(Access, Dim, Format)>,
-);
-unsafe impl<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat> ThinHandle
-    for Image<Access, Dim, Format>
+pub struct Image<
+    Access: ImageAccess,
+    Dim: Dimensionality,
+    Format: ImageFormat,
+    Samples: ImageSamples,
+>(vk::Image, PhantomData<(Access, Dim, Format, Samples)>);
+unsafe impl<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat, Samples: ImageSamples>
+    ThinHandle for Image<Access, Dim, Format, Samples>
 {
     type Handle = vk::Image;
 }
@@ -743,9 +1130,11 @@ unsafe impl<Access: BufferAccess> ThinHandle for BufferReference<'_, Access> {
     type Handle = vk::Buffer;
 }
 
-/// A vulkan device.
+/// A Vulkan "Logical Device," and all associated function pointers.
 ///
 /// This contains all the function pointers needed to operate. All device-scope operations go through this object.
+///
+/// To create one, acquire an [`ash::Device`] as documented by `ash` and pass it to [`Device::from_ash`].
 pub struct Device(ash::Device);
 
 thin_handle! {
@@ -779,6 +1168,7 @@ impl FenceState for Pending {}
 /// # Typestate
 /// * `State`: Whether the fence is signaled, unsignaled, or in the process of becoming signaled.
 #[repr(transparent)]
+#[must_use = "dropping the handle will not destroy the fence and may leak resources"]
 pub struct Fence<State: FenceState>(vk::Fence, PhantomData<State>);
 
 unsafe impl<State: FenceState> ThinHandle for Fence<State> {
@@ -786,11 +1176,13 @@ unsafe impl<State: FenceState> ThinHandle for Fence<State> {
 }
 thin_handle! {
     /// A synchronization primitive for CPU->GPU communication and fine-grained *intra*-queue GPU->GPU dependencies.
+#[must_use = "dropping the handle will not destroy the event and may leak resources"]
     pub struct Event(vk::Event);
 }
 
 thin_handle! {
     /// A synchronization primitive for GPU->GPU communication and coarse-grained inter-queue dependencies.
+#[must_use = "dropping the handle will not destroy the semaphore and may leak resources"]
     pub struct Semaphore(vk::Semaphore);
 }
 
@@ -820,6 +1212,246 @@ thin_handle! {
     #[must_use = "dropping the handle will not deallocate the buffer and may leak resources"]
     pub struct CommandBuffer<Level: CommandBufferLevel>(vk::CommandBuffer);
 }
+thin_handle! {
+    /// A block of shader code that has been forwarded to the implementation.
+    /// Includes one or more "entry points" of possibly heterogeneous shader stages.
+    ///
+    /// Use [`Self::entry`] to reference a specific entry point for use in a pipeline.
+    #[must_use = "dropping the handle will not deallocate the module and may leak resources"]
+    pub struct ShaderModule(vk::ShaderModule);
+}
+
+/// The stage of a pipeline a shader is for.
+pub trait ShaderStage {
+    const FLAG: vk::ShaderStageFlags;
+}
+impl ShaderStage for Vertex {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
+}
+pub struct Geometry;
+impl ShaderStage for Geometry {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::GEOMETRY;
+}
+pub struct TessControl;
+impl ShaderStage for TessControl {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_CONTROL;
+}
+pub struct TessEvaluation;
+impl ShaderStage for TessEvaluation {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_EVALUATION;
+}
+pub struct TaskEXT;
+impl ShaderStage for TaskEXT {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TASK_EXT;
+}
+pub struct MeshEXT;
+impl ShaderStage for MeshEXT {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::MESH_EXT;
+}
+pub struct Fragment;
+impl ShaderStage for Fragment {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+}
+pub struct Compute;
+impl ShaderStage for Compute {
+    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+}
+
+impl ShaderModule {
+    /// Reference a specific entry point within this module.
+    /// # Safety
+    /// * The module must contain an entry point called `name`
+    /// * The entry point must be of a type consistent with `Stage`
+    /// * The device must be capable of using a shader of type `Stage`
+    pub unsafe fn entry<'a, Stage: ShaderStage>(
+        &'a self,
+        name: &'a std::ffi::CStr,
+        _stage: Stage,
+    ) -> Entry<'a, Stage> {
+        Entry {
+            module: self.handle(),
+            entry: name,
+            _marker: PhantomData,
+        }
+    }
+    /// Helper function for GLSL modules, where there is always exactly one
+    /// entry point and it is always called "main".
+    ///  # Safety
+    /// * The module must contain an entry point called `main`
+    /// * The entry point must be of a type consistent with `Stage`
+    /// * The device must be capable of using a shader of type `Stage`
+    pub unsafe fn main<Stage: ShaderStage>(&self, _stage: Stage) -> Entry<Stage> {
+        self.entry(c"main", _stage)
+    }
+}
+
+/// A reference to a shader module, bundled with an entry point name and the stage of said entry point.
+///
+/// Created by [`ShaderModule::entry`].
+/// # Typestates
+/// * `Stage`: The type of the shader, e.g. [`Vertex`], [`Compute`]
+#[derive(Copy, Clone)]
+pub struct Entry<'a, Stage: ShaderStage> {
+    module: vk::ShaderModule,
+    entry: &'a std::ffi::CStr,
+    _marker: PhantomData<(&'a ShaderModule, Stage)>,
+}
+impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
+    /// Provide constants to the shader compiler.
+    ///
+    /// If your shader does not use specialization, you can specialize on the unit type:
+    /// ```no_run
+    /// # let module : ShaderModule = todo!();
+    /// let specialized_entry = module.main().specialize(());
+    /// ```
+    /// # Safety
+    /// * Every constant necessary for a complete module entry point must be populated by the [entries](Specialization::ENTRIES) of `S`.
+    /// * Every types required by the shader must match the types provided by `S`
+    pub unsafe fn specialize<S: Specialization>(
+        self,
+        specialization: &'a S,
+    ) -> SpecializedEntry<'a, Stage> {
+        SpecializedEntry {
+            module: self.module,
+            entry: self.entry,
+            specialization_info: vk::SpecializationInfo {
+                data_size: std::mem::size_of::<S>(),
+                p_data: (specialization as *const S).cast(),
+                ..vk::SpecializationInfo::default().map_entries(S::ENTRIES)
+            },
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// A reference to a shader module, bundled with an entry point name, the stage of said entry point, and
+/// the specialization constants needed to make it concrete.
+///
+/// Created by [`Entry::specialize`].
+/// # Typestates
+/// * `Stage`: The type of the shader, e.g. [`Vertex`], [`Compute`]
+pub struct SpecializedEntry<'a, Stage: ShaderStage> {
+    module: vk::ShaderModule,
+    entry: &'a std::ffi::CStr,
+    // &dyn but funny
+    specialization_info: vk::SpecializationInfo<'a>,
+    // specialization_map: &'a [vk::SpecializationMapEntry],
+    // specialization_data: *const u8,
+    // specialization_size: usize,
+    _marker: PhantomData<(&'a ShaderModule, Stage)>,
+}
+impl<'a, Stage: ShaderStage> SpecializedEntry<'a, Stage> {
+    pub fn specialization_info<'this>(&'this self) -> &'this vk::SpecializationInfo<'this>
+    where
+        'a: 'this,
+    {
+        &self.specialization_info
+    }
+    pub fn create_info(&'_ self) -> vk::PipelineShaderStageCreateInfo<'_> {
+        vk::PipelineShaderStageCreateInfo::default()
+            .module(self.module)
+            .name(self.entry)
+            .stage(Stage::FLAG)
+            .specialization_info(self.specialization_info())
+    }
+}
+
+/// A type which can be used as a specialization constant.
+///
+/// # Safety
+/// * Each entry in `ENTRIES` must refer to a range inside the bounds of `Self`.
+/// * Each range in `Self` referred to by `ENTRIES` must be a valid value of the
+///   type the shader expects.
+///   * This req sucks uwu. Basically the layout of this structure and the shader *must* agree.
+pub unsafe trait Specialization {
+    const ENTRIES: &'static [vk::SpecializationMapEntry];
+}
+unsafe impl Specialization for () {
+    const ENTRIES: &'static [vk::SpecializationMapEntry] = &[];
+}
+
+/// Shaders controlling generation of primitives
+pub enum PreRasterShaders<'a> {
+    /// VertexInput -> Primitive Assembly -> Vertex -> (Tess?) -> (Geometry?)
+    Vertex {
+        vertex: SpecializedEntry<'a, Vertex>,
+        tess: Option<(
+            SpecializedEntry<'a, TessControl>,
+            SpecializedEntry<'a, TessEvaluation>,
+        )>,
+        geometry: Option<SpecializedEntry<'a, Geometry>>,
+    },
+    /// (Task?) -> Mesh
+    Mesh(
+        Option<SpecializedEntry<'a, TaskEXT>>,
+        SpecializedEntry<'a, MeshEXT>,
+    ),
+}
+/// The set of shaders that forms a complete graphics pipeline.
+pub struct GraphicsShaders<'a> {
+    /// Shaders that generate primitives to be rasterized
+    pre_raster: PreRasterShaders<'a>,
+    /// Shader after primitives are rasterized.
+    fragment: Option<SpecializedEntry<'a, Fragment>>,
+}
+impl<'a> GraphicsShaders<'a> {
+    /// Maximum number of shader stages possible in a single pipeline
+    const MAX_SHADER_STAGES: usize = 5;
+    pub fn create_infos<'this>(
+        &'this self,
+    ) -> tinyvec::ArrayVec<[vk::PipelineShaderStageCreateInfo<'this>; Self::MAX_SHADER_STAGES]>
+    where
+        'a: 'this,
+    {
+        let Self {
+            pre_raster,
+            fragment,
+        } = self;
+        // This default()s the array. Whyy?
+        let mut vec = tinyvec::ArrayVec::new();
+        if let PreRasterShaders::Vertex {
+            vertex,
+            tess,
+            geometry,
+        } = &pre_raster
+        {
+            vec.push(vertex.create_info());
+            if let Some((tessc, tesse)) = tess {
+                vec.push(tessc.create_info());
+                vec.push(tesse.create_info());
+            }
+            if let Some(geometry) = geometry {
+                vec.push(geometry.create_info());
+            }
+        }
+        if let Some(fragment) = fragment {
+            vec.push(fragment.create_info());
+        }
+
+        vec
+    }
+}
+
+pub trait BindPoint {
+    const BIND_POINT: vk::PipelineBindPoint;
+}
+pub struct Graphics;
+impl BindPoint for Graphics {
+    const BIND_POINT: vk::PipelineBindPoint = vk::PipelineBindPoint::GRAPHICS;
+}
+impl BindPoint for Compute {
+    const BIND_POINT: vk::PipelineBindPoint = vk::PipelineBindPoint::COMPUTE;
+}
+
+thin_handle! {
+    pub struct Pipeline<Kind: BindPoint>(vk::Pipeline);
+
+}
+
+pub struct ComputePipelineCreateInfo<'a> {
+    pub shader: SpecializedEntry<'a, Compute>,
+    pub layout: vk::PipelineLayout,
+}
 
 /// A render pass, describing the flow of rendering operations on a Framebuffer.
 ///
@@ -848,6 +1480,16 @@ pub enum SubmitError {
     /// The device context is irreparably destroyed. Oops!
     DeviceLost = vk::Result::ERROR_DEVICE_LOST.as_raw(),
 }
+impl std::error::Error for SubmitError {}
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfHostMemory => write!(f, "out of host memory"),
+            Self::OutOfDeviceMemory => write!(f, "out of device memory"),
+            Self::DeviceLost => write!(f, "device lost"),
+        }
+    }
+}
 impl SubmitError {
     /// Convert from a vulkan result code.
     /// Must be one of `ERROR_OUT_OF_HOST_MEMORY`, `ERROR_OUT_OF_DEVICE_MEMORY`, or `ERROR_DEVICE_LOST`, otherwise
@@ -863,10 +1505,12 @@ impl SubmitError {
     }
 }
 #[repr(i32)]
+/// The result of querying or waiting on the state of a [`Fence`].
 pub enum FencePoll<Success, Pending> {
     Signaled(Success) = vk::Result::SUCCESS.as_raw(),
     Unsignaled(Pending) = vk::Result::NOT_READY.as_raw(),
 }
+/// The timeout for a host-side wait.
 pub enum Timeout {
     /// Don't wait, check the status and immediately return.
     Poll,
@@ -888,7 +1532,102 @@ impl Timeout {
     }
 }
 
+/// A thin handle (an image, a fence, etc.) that has been associated with a device and
+/// can thus have its own associated functions.
+///
+/// Use [`Device::bind`] to acquire.
+pub struct Bound<'device, T: ThinHandle>(T, &'device Device);
+impl<'device, T: ThinHandle> Bound<'device, T> {
+    /// Extract the typed handle.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+    /// Access the untyped handle.
+    /// # Safety
+    /// See [`ThinHandle::handle`]
+    pub unsafe fn handle(&self) -> T::Handle {
+        self.0.handle()
+    }
+    /// Assign a new typstate the bound handle.
+    /// # Safety
+    /// See [`ThinHandle::with_state`]
+    pub unsafe fn with_state<U: ThinHandle<Handle = T::Handle>>(self) -> Bound<'device, U> {
+        Bound(self.0.with_state(), self.1)
+    }
+}
+
+impl<'a> Bound<'a, Fence<Pending>> {
+    pub unsafe fn wait(self) -> Result<Bound<'a, Fence<Signaled>>, SubmitError> {
+        self.1.wait_fence(self.0).map(|fence| self.1.bind(fence))
+    }
+}
+impl<'a, State: KnownFenceState> Bound<'a, Fence<State>> {
+    pub unsafe fn reset(self) -> Result<Bound<'a, Fence<Unsignaled>>, AllocationError> {
+        self.1.reset_fence(self.0).map(|fence| self.1.bind(fence))
+    }
+    pub unsafe fn destroy(self) {
+        unsafe {
+            self.1.destroy_fence(self.0);
+        }
+    }
+}
+pub struct BufferImageCopy<Dim: Dimensionality> {
+    /// The minima of the rectangular bound to copy.
+    pub image_offset: Dim::Offset,
+    /// The size of the rectangular bound to copy.
+    pub image_extent: Dim::Extent,
+    /// The start offset, in bytes, of the first texel to begin transferring.
+    pub buffer_offset: u64,
+    /// Parameters controlling how texel addresses are calculated within buffer.
+    pub pitch: Dim::Pitch,
+    /*
+    /// The distance in *texels* (not bytes!) between the start of one row and the start
+    /// of the next, or `None` for tight packing (i.e. the `width` of the image)
+    ///
+    /// If not None, must be >= the tight packed pitch (rows must not alias, even for
+    /// a read-only operation)
+    pub row_pitch: Option<NonZero<u32>>,
+    /// The distance in *texels* (not bytes!) between the start of one 2D slice of a 3D image or 2D array image
+    /// and the start of the next, or `None` for tight packing (i.e. the `width * height` of the image)
+    ///
+    /// If not None, must be >= the tight packed pitch (slices must not alias, even for
+    /// a read-only operation)
+    pub slice_pitch: Option<NonZero<u32>>,
+    */
+    /// Which mip level, and optionally which layers of an array image, to copy.
+    pub layers: Dim::SubresourceLayers,
+}
+
 impl Device {
+    /// Bundle a handle with a device pointer, allowing the handle to
+    /// have it's own associated functions and making method chaining possible even
+    /// through several operations which change the type of it's operand.
+    ///
+    /// Generally, if an operation takes only the device and the handle and returns either,
+    /// it can be executed using a [`Bound`] handle for cleaner syntax.
+    ///
+    /// This is a zero-cost operation.
+    ///
+    /// ```no_run
+    /// # let device: Device = todo!();
+    /// let pending_fence: Fence<Pending> = todo!();
+    /// let completed_fence = device.wait(pending_fence).unwrap();
+    /// device.destroy_fence(completed_fence);
+    /// ```
+    /// becomes
+    /// ```no_run
+    /// # let device: Device = todo!();
+    /// let pending_fence: Fence<Pending> = todo!();
+    /// device.bind(pending_fence)
+    ///     .wait().unwrap()
+    ///     .destroy();
+    /// ```
+    ///
+    /// # Safety
+    /// The handle must be acquired from this device.
+    pub unsafe fn bind<Handle: ThinHandle>(&self, handle: Handle) -> Bound<Handle> {
+        Bound(handle, self)
+    }
     /// Wrap an [`ash`] device.
     ///
     /// This is the main entry point for this crate.
@@ -896,7 +1635,7 @@ impl Device {
         Device(device)
     }
     /// Submit work to a queue.
-    /// An optional fence will be signaled upon completion.
+    /// The fence will be signaled upon completion.
     pub unsafe fn submit_with_fence(
         &self,
         queue: &mut Queue,
@@ -907,6 +1646,33 @@ impl Device {
             .map_err(SubmitError::from_vk)?;
         Ok(fence.with_state())
     }
+    /// Wait for a queue to complete all prior submissions, *as if* a fence on all prior
+    /// submissions had been waited on.
+    pub unsafe fn queue_wait_idle(&self, queue: &mut Queue) -> Result<(), SubmitError> {
+        self.0
+            .queue_wait_idle(queue.handle())
+            .map_err(SubmitError::from_vk)
+    }
+    /// *As if* all queues owned by the device had `queue_wait_idle` called on them.
+    /// # Safety
+    /// * Requires *unique* (mutable) access to all device queues for the duration of the call.
+    ///
+    /// This cannot currently be proven at compile time. Passing mutable references to *all*
+    /// queues allows it to be checked, but it cannot be proven that all queues are present.
+    pub unsafe fn wait_idle(&self, _queues: &mut [&mut Queue]) -> Result<(), SubmitError> {
+        self.0.device_wait_idle().map_err(SubmitError::from_vk)
+    }
+    pub unsafe fn create_module(&self, spirv: &[u32]) -> Result<ShaderModule, AllocationError> {
+        debug_assert!(!spirv.is_empty());
+        self.0
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spirv), None)
+            .map(|handle| ShaderModule::from_handle(handle))
+            .map_err(AllocationError::from_vk)
+    }
+    pub unsafe fn destroy_module(&self, module: ShaderModule) -> &Self {
+        self.0.destroy_shader_module(module.into_handle(), None);
+        self
+    }
     /// Create a fence in the given state, [`Signaled`] or [`Unsignaled`].
     /// ```no_run
     /// # let device : Device = todo!();
@@ -914,14 +1680,23 @@ impl Device {
     /// ```
     pub unsafe fn create_fence<State: KnownFenceState>(
         &self,
-    ) -> Result<Fence<State>, AllocationError> {
+    ) -> Result<Bound<Fence<State>>, AllocationError> {
         self.0
             .create_fence(
                 &vk::FenceCreateInfo::default().flags(State::CREATION_FLAGS),
                 None,
             )
             .map(|handle| Fence::from_handle(handle))
+            .map(|handle| self.bind(handle))
             .map_err(AllocationError::from_vk)
+    }
+    /// Set each fence to the "Unsignaled" state. It is valid to reset an already unsignaled
+    /// fence.
+    pub unsafe fn reset_fence<State: KnownFenceState>(
+        &self,
+        fence: Fence<State>,
+    ) -> Result<Fence<Unsignaled>, AllocationError> {
+        self.reset_fences([fence]).map(|[fence]| fence)
     }
     /// Set each fence to the "Unsignaled" state. It is valid to reset an already unsignaled
     /// fence.
@@ -972,7 +1747,7 @@ impl Device {
         }
     }
     /// Wait for every fence in the array to become signaled, or fail after some timeout.
-    /// If timeout is not [`Timeout::Infinite`], the result may be immediately out-of-date.
+    /// If the result is [`FencePoll::Unsignaled`], the result may become immediately out-of-date.
     pub unsafe fn wait_all_fences_timeout<const N: usize>(
         &self,
         fences: [Fence<Pending>; N],
@@ -1099,21 +1874,23 @@ impl Device {
     ///
     /// ```no_run
     /// # let device: Device = todo!();
-    /// let buffer = device.create_buffer::<(Storage, TransferSrc, TransferDst)>(
+    /// let buffer = device.create_buffer(
+    ///         (Storage, TransferSrc, TransferDst),
     ///         1024,
     ///         SharingMode::Concurrent(SharingFamilies::from_array(&[0, 1])),
     ///     );
     /// ```
     pub unsafe fn create_buffer<Access: BufferAccess>(
         &self,
-        size: u64,
+        _usage: Access,
+        size: NonZero<u64>,
         sharing: SharingMode,
     ) -> Result<Buffer<Access>, AllocationError> {
         self.0
             .create_buffer(
                 &vk::BufferCreateInfo::default()
                     .usage(Access::FLAGS)
-                    .size(size)
+                    .size(size.get())
                     .sharing_mode(sharing.mode())
                     .queue_family_indices(sharing.family_slice()),
                 None,
@@ -1125,11 +1902,16 @@ impl Device {
         self.0.destroy_buffer(buffer.handle(), None);
         self
     }
-    /// Create an image. The `vkImageUsageFlags`, Dimensionality, and Aspects are passed at compile time:
+    /// Create an image. The `vkImageUsageFlags`, Dimensionality, Aspect mask, and Multisampled-ness
+    /// are passed at compile time:
     ///
     /// ```no_run
     /// # let device: Device = todo!();
-    /// let image = device.create_image::<(TransferSrc, ColorAttachment), _, _>(
+    /// let image = device.create_image(
+    ///         // The usages the image will be created with.
+    ///         // This becomes part of the image's type.
+    ///         // A tuple of usages or a single usage may be provided.
+    ///         (TransferSrc, ColorAttachment),
     ///         // Extent2D makes a `D2` image.
     ///         // You can also use Extent1DArray, Extent3D, etc.
     ///         Extent2D {
@@ -1140,21 +1922,30 @@ impl Device {
     ///         // ColorFormat makes a COLOR_ASPECT image.
     ///         // You can also use DepthStencilFormat
     ///         ColorFormat::Rgba8Unorm,
+    ///         // Makes a non-multisampled image.
+    ///         // You can also use the MultiSampled enum.
+    ///         SingleSampled,
     ///         vk::ImageTiling::Optimal,
     ///         SharingMode::Exclusive
     ///     ).unwrap();
     /// ```
     ///
-    /// See: [`ImageAccess`], [`Extent`], [`ColorFormat`], [`DepthStencilFormat`].
-    pub unsafe fn create_image<Access: ImageAccess, Ext: Extent, Format: ImageFormat>(
+    /// See: [`ImageAccess`], [`Extent`], [`ColorFormat`], [`DepthStencilFormat`], [`MultiSampled`].
+    pub unsafe fn create_image<
+        Access: ImageAccess,
+        Ext: Extent,
+        Format: ImageFormat,
+        Samples: ImageSamples,
+    >(
         &self,
+        _usage: Access,
         extent: Ext,
         mip_levels: NonZero<u32>,
         format: Format,
-        samples: vk::SampleCountFlags,
+        samples: Samples,
         tiling: vk::ImageTiling,
         sharing: SharingMode,
-    ) -> Result<Image<Access, Ext::Dim, Format>, AllocationError> {
+    ) -> Result<Image<Access, Ext::Dim, Format, Samples>, AllocationError> {
         self.0
             .create_image(
                 &vk::ImageCreateInfo::default()
@@ -1167,12 +1958,72 @@ impl Device {
                     .format(format.format())
                     .mip_levels(mip_levels.get())
                     .initial_layout(vk::ImageLayout::UNDEFINED)
-                    .samples(samples)
+                    .samples(samples.flag())
                     .tiling(tiling),
                 None,
             )
             .map(|handle| Image::from_handle(handle))
             .map_err(AllocationError::from_vk)
+    }
+    pub unsafe fn destroy_image<
+        Access: ImageAccess,
+        Dim: Dimensionality,
+        Format: ImageFormat,
+        Samples: ImageSamples,
+    >(
+        &self,
+        image: Image<Access, Dim, Format, Samples>,
+    ) -> &Self {
+        self.0.destroy_image(image.handle(), None);
+        self
+    }
+    /// Create (possibly) several compute pipelines.
+    /// If *any* pipeline fails to be created, the others are freed
+    /// and the error is returned.
+    pub unsafe fn create_compute_pipelines<const N: usize>(
+        &self,
+        _cache: Option<&mut ()>,
+        infos: [ComputePipelineCreateInfo; N],
+    ) -> Result<[Pipeline<Compute>; N], AllocationError> {
+        let infos = infos.each_ref().map(|info| {
+            vk::ComputePipelineCreateInfo::default()
+                .layout(info.layout)
+                .stage(info.shader.create_info())
+        });
+        let mut output = std::mem::MaybeUninit::<[vk::Pipeline; N]>::uninit();
+        // We call the raw form (not ash's wrapper) since it works on slices and vecs
+        // while we work on arrays and can thus skip an allocation
+        let res = (self.0.fp_v1_0().create_compute_pipelines)(
+            self.0.handle(),
+            vk::PipelineCache::null(),
+            N.try_into().unwrap(),
+            infos.as_ptr(),
+            std::ptr::null(),
+            output.as_mut_ptr().cast(),
+        );
+        // # Safety
+        // Always populates the whole array, failures are populated with NULL.
+        // Complete failure (i.e. no successes) even results in all NULLs. How polite!
+        let output = output.assume_init();
+
+        match res {
+            vk::Result::SUCCESS => Ok(output.map(|handle| {
+                debug_assert!(!handle.is_null());
+                Pipeline::from_handle(handle)
+            })),
+            _ => {
+                for handle in output {
+                    if !handle.is_null() {
+                        self.0.destroy_pipeline(handle, None);
+                    }
+                }
+                Err(AllocationError::from_vk(res))
+            }
+        }
+    }
+    pub unsafe fn destroy_pipeline<Kind: BindPoint>(&self, pipeline: Pipeline<Kind>) -> &Self {
+        self.0.destroy_pipeline(pipeline.into_handle(), None);
+        self
     }
     pub unsafe fn create_render_pass<const N: usize>(
         &self,
@@ -1188,13 +2039,6 @@ impl Device {
             )
             .map(|handle| RenderPass::from_handle(handle))
             .map_err(AllocationError::from_vk)
-    }
-    pub unsafe fn destroy_image<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat>(
-        &self,
-        image: Image<Access, Dim, Format>,
-    ) -> &Self {
-        self.0.destroy_image(image.handle(), None);
-        self
     }
     pub unsafe fn begin_command_buffer<'a, Level: CommandBufferLevel>(
         &'_ self,
@@ -1253,6 +2097,133 @@ impl Device {
             .end_command_buffer(buffer.buffer)
             .map_err(AllocationError::from_vk)?;
         Ok(self)
+    }
+    pub unsafe fn bind_pipeline<
+        'a,
+        'b,
+        Kind: BindPoint,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+    >(
+        &'a self,
+        buffer: &'b mut RecordingBuffer<Level, MaybeInsideRender>,
+        pipeline: &'b Pipeline<Kind>,
+    ) -> &'a Self {
+        self.0
+            .cmd_bind_pipeline(buffer.handle(), Kind::BIND_POINT, pipeline.handle());
+        self
+    }
+    pub unsafe fn dispatch<'a, Level: CommandBufferLevel, MaybeInsideRender: CommandBufferState>(
+        &'a self,
+        buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        [x, y, z]: [NonZero<u32>; 3],
+    ) -> &'a Self {
+        self.0
+            .cmd_dispatch(buffer.handle(), x.get(), y.get(), z.get());
+        self
+    }
+    pub unsafe fn copy_buffer_to_image<
+        'a,
+        const N: usize,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+        SuperAccess: ImageSuperset<TransferDst>,
+        Dim: Dimensionality,
+    >(
+        &'a self,
+        command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        buffer: impl AsRef<Buffer<TransferSrc>>,
+        // FIXME: DepthStencil needs a way to specify *which* of the two aspects.
+        image: Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
+        image_layout: vk::ImageLayout,
+        regions: [BufferImageCopy<Dim>; N],
+    ) -> &'a Self {
+        self.0.cmd_copy_buffer_to_image(
+            command_buffer.handle(),
+            buffer.as_ref().handle(),
+            image.handle(),
+            image_layout,
+            &regions.map(|region| vk::BufferImageCopy {
+                image_offset: region.image_offset.offset(),
+                image_extent: region.image_extent.extent(),
+                buffer_offset: region.buffer_offset,
+                // None for automatic pitch calculation is mapped to a value of 0, convenient!
+                buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
+                buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
+                // FIXME: Aspect should be dynamic!
+                image_subresource: region.layers.subresource_layers(Aspect::Color),
+            }),
+        );
+        todo!()
+    }
+    pub unsafe fn copy_image_to_buffer<
+        'a,
+        const N: usize,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+        SuperAccess: ImageSuperset<TransferSrc>,
+        Dim: Dimensionality,
+    >(
+        &'a self,
+        command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        // FIXME: DepthStencil needs a way to specify *which* of the two aspects.
+        image: Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
+        image_layout: vk::ImageLayout,
+        buffer: impl AsRef<Buffer<TransferDst>>,
+        regions: [BufferImageCopy<Dim>; N],
+    ) -> &'a Self {
+        self.0.cmd_copy_image_to_buffer(
+            command_buffer.handle(),
+            image.handle(),
+            image_layout,
+            buffer.as_ref().handle(),
+            &regions.map(|region| vk::BufferImageCopy {
+                image_offset: region.image_offset.offset(),
+                image_extent: region.image_extent.extent(),
+                buffer_offset: region.buffer_offset,
+                // None for automatic pitch calculation is mapped to a value of 0, convenient!
+                buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
+                buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
+                // FIXME: Aspect should be dynamic!
+                image_subresource: region.layers.subresource_layers(Aspect::Color),
+            }),
+        );
+        todo!()
+    }
+    pub unsafe fn dispatch_base<
+        'a,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+    >(
+        &'a self,
+        buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        base: [u32; 3],
+        count: [NonZero<u32>; 3],
+    ) -> &'a Self {
+        self.0.cmd_dispatch_base(
+            buffer.handle(),
+            base[0],
+            base[1],
+            base[2],
+            count[0].get(),
+            count[1].get(),
+            count[2].get(),
+        );
+        self
+    }
+    pub unsafe fn dispatch_indirect<
+        'a,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+    >(
+        &'a self,
+        buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        indirect: impl AsRef<Buffer<Indirect>>,
+        offset: u64,
+    ) -> &'a Self {
+        self.0
+            .cmd_dispatch_indirect(buffer.handle(), indirect.as_ref().handle(), offset);
+        self
     }
     pub unsafe fn begin_render_pass<const N: usize, Level: CommandBufferLevel>(
         &self,
@@ -1329,21 +2300,32 @@ impl Device {
 unsafe fn waawa() {
     let device: Device = todo!();
     let mut queue: Queue = todo!();
+
+    let image_extent = Extent2D {
+        width: NonZero::new(128).unwrap(),
+        height: NonZero::new(128).unwrap(),
+    };
+
     let mut pool = device
         .create_command_pool(&vk::CommandPoolCreateInfo::default())
         .unwrap();
     let buffer = device
-        .create_buffer::<(Vertex, Index)>(1024, SharingMode::Exclusive)
+        .create_buffer(
+            (Vertex, Index, TransferSrc),
+            NonZero::new(
+                u64::from(image_extent.width.get()) * u64::from(image_extent.height.get()) * 4,
+            )
+            .unwrap(),
+            SharingMode::Exclusive,
+        )
         .unwrap();
     let image = device
-        .create_image::<(TransferDst, TransferSrc), _, _>(
-            Extent2D {
-                width: NonZero::new(10).unwrap(),
-                height: NonZero::new(10).unwrap(),
-            },
+        .create_image(
+            (TransferDst, TransferSrc),
+            image_extent,
             NonZero::new(1).unwrap(),
             ColorFormat::Rgba8Unorm,
-            vk::SampleCountFlags::TYPE_1,
+            SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
         )
@@ -1352,7 +2334,20 @@ unsafe fn waawa() {
     let renderpass = device.create_render_pass(&[todo!(), todo!()]).unwrap();
     let [mut cb1, mut cb2] = device.allocate_primary_buffers(&mut pool).unwrap();
 
-    let recording = device.begin_command_buffer(&mut pool, &mut cb1).unwrap();
+    let mut recording = device.begin_command_buffer(&mut pool, &mut cb1).unwrap();
+    device.copy_buffer_to_image(
+        &mut recording,
+        buffer,
+        image,
+        vk::ImageLayout::UNDEFINED,
+        [BufferImageCopy {
+            buffer_offset: 0,
+            image_extent,
+            layers: SubresourceMip(0),
+            image_offset: Offset::ORIGIN,
+            pitch: BufferPitch::PACKED,
+        }],
+    );
     let mut render_pass = device.begin_render_pass(recording, &renderpass);
     device
         .bind_vertex_buffers(&mut render_pass, 0, &[buffer.reference()], &[0])
@@ -1367,9 +2362,9 @@ unsafe fn waawa() {
         .destroy_command_pool(pool)
         .destroy_buffer(buffer)
         .destroy_image(image);
-    let fence: Fence<Unsignaled> = device.create_fence::<Unsignaled>().unwrap();
-    let fence: Fence<Pending> = device.submit_with_fence(&mut queue, fence).unwrap();
-    let fence: Fence<Signaled> = device.wait_fence(fence).unwrap();
+    let fence = device.create_fence::<Unsignaled>().unwrap().into_inner();
+    let fence = device.submit_with_fence(&mut queue, fence).unwrap();
+    let fence = device.wait_fence(fence).unwrap();
     device.destroy_fence(fence);
 }
 
