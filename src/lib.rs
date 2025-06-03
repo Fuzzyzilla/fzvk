@@ -1,14 +1,17 @@
 //! # Fuzzy's Funny Zero-cost Excessively-Typestate Vulkan Abstraction
-//! A thin wrapper around [`ash`]. This crate is not associated with the ash project!
+//! A thin wrapper around [`ash`]. This crate is not associated with the ash
+//! project!
 //!
-//! To get started, fetch an [`ash::Device`] and pass it to [`Device::from_ash`].
+//! To get started, fetch an [`ash::Device`] and pass it to
+//! [`Device::from_ash`].
 //!
 //! ## Typestate
-//! This crate makes extensive (perhaps excessive) use of the
-//! [typestate pattern](https://en.wikipedia.org/wiki/Typestate_analysis) to validate *some* operations.
-//! Of course, the scope of what can be declared at compile time is inherently limited by the need for
-//! runtime flexibility, so it is mostly used in locations where it is a common usage pattern that the
-//! "shape" of the data will not be totally dynamic.
+//! This crate makes extensive (perhaps excessive) use of the [typestate
+//! pattern](https://en.wikipedia.org/wiki/Typestate_analysis) to validate
+//! *some* operations. Of course, the scope of what can be declared at compile
+//! time is inherently limited by the need for runtime flexibility, so it is
+//! mostly used in locations where it is a common usage pattern that the "shape"
+//! of the data will not be totally dynamic.
 //!
 //! For example, an [`Image`] contains the following compile-time information:
 //! * Whether it is a Color or Depth/Stencil Aspect image.
@@ -22,67 +25,76 @@
 //! # use fzvk::*;
 //! let image : Image<(Storage, TransferDst), D2Array, ColorFormat, SingleSampled> = todo!();
 //! ```
-//! Since each of these facts are almost always known at compile time and have large implications
-//! for valid usage of the resource, they are tracked at compile time too.
+//! Since each of these facts are almost always known at compile time and have
+//! large implications for valid usage of the resource, they are tracked at
+//! compile time too.
 //!
-//! This allows for functions to validate, at compile time, whether certain aspects of the operation
-//! are valid and produce a compiler error if the state of an object is not statically known to be correct.
-//! See [`Device::bind_vertex_buffers`] for what that looks like.
+//! This allows for functions to validate, at compile time, whether certain
+//! aspects of the operation are valid and produce a compiler error if the state
+//! of an object is not statically known to be correct. See
+//! [`Device::bind_vertex_buffers`] for what that looks like.
 //!
 //! ### What if it *needs* to be dynamic?
-//! If there is a finite enumeration of dynamic states, `enum`s or even `union`s around the possible
-//! typestates are good choices.
+//! If there is a finite enumeration of dynamic states, `enum`s or even `union`s
+//! around the possible typestates are good choices.
 //!
-//! For states too dynamic even for that strategy, raw vulkan may be used.
-//! Since this crate is a thin wrapper around [`ash`], it is perfectly valid to mix and match API
-//! calls from both. See the [`ThinHandle`] trait for how to move data in and out of the typestate
-//! ecosystem and the safety considerations of this.
+//! For states too dynamic even for that strategy, raw vulkan may be used. Since
+//! this crate is a thin wrapper around [`ash`], it is perfectly valid to mix
+//! and match API calls from both. See the [`ThinHandle`] trait for how to move
+//! data in and out of the typestate ecosystem and the safety considerations of
+//! this.
 //!
 //! ## Zero cost
 //! * Types do not contain any runtime state beyond their vulkan handles.
 //!   * Typestate "data" is zero-sized and compiles down to nothing at all
-//!   * Handles do not contain the necessary function pointers, thus all operations must go through
-//!     the central [`Device`] type.
-//!   * The big exception to this is [`Device`], which contains several kilobytes of function pointers
-//!     on the stack. We can't all be winners :3
+//!   * Handles do not contain the necessary function pointers, thus all
+//!     operations must go through the central [`Device`] type.
+//!   * The big exception to this is [`Device`], which contains several
+//!     kilobytes of function pointers on the stack. We can't all be winners :3
 //! * Allocations are avoided like the plague.
-//!   * Wherever possible, const-generic arrays are used instead to make variable-length operations
-//!     occur exclusively on the stack.
-//! * Even `if` statements are used with some trepedation. If the condition can be moved to the type
-//!   level, it will be.
-//! * Vulkan functions are only called when explicity issued by the user, or when
-//!   unambiguously implied at compile time.
+//!   * Wherever possible, const-generic arrays are used instead to make
+//!     variable-length operations occur exclusively on the stack.
+//! * Even `if` statements are used with some trepedation. If the condition can
+//!   be moved to the type level, it will be.
+//! * Vulkan functions are only called when explicity issued by the user, or
+//!   when unambiguously implied at compile time.
 //!   * *Handles do not implement Drop*
 //!
 //! ## Errors
-//! All vulkan runtime errors (Device lost, out-of-memory, etc.), with the exception of "expected" errors
-//! like `ERROR_TIMEOUT` or s`ERROR_NOT_READY`, are assumed to be fatal to the library.
-//! While this will not result in panics or undefined behavior, it may result in resource leaks. Fixme!
+//! All vulkan runtime errors (Device lost, out-of-memory, etc.), with the
+//! exception of "expected" errors like `ERROR_TIMEOUT` or s`ERROR_NOT_READY`,
+//! are assumed to be fatal to the library. While this will not result in panics
+//! or undefined behavior, it may result in resource leaks. Fixme!
 //!
 //! ## Safety
-//! While this crate attempts to validate some subset of the vulkan correct-usage rules, it does not
-//! (and *can not*) validate everything. Vulkan is still a deeply unsafe API with many opportunities for
-//! incorrect usage to result in undefined behavior.
+//! While this crate attempts to validate some subset of the vulkan
+//! correct-usage rules, it does not (and *can not*) validate everything. Vulkan
+//! is still a deeply unsafe API with many opportunities for incorrect usage to
+//! result in undefined behavior.
 //!
-//! Functions that take multiple objects must have the correct ownership hierarchies
-//! (e.g. the parameters passed to [`Device::begin_command_buffer`] should be a command buffer,
-//! the command pool from which it is allocated, and the device they both belong to.) This crate
-//! takes advantange of this fact for additional compile-time checks, such as *external synchronization*.
+//! Functions that take multiple objects must have the correct ownership
+//! hierarchies (e.g. the parameters passed to [`Device::begin_command_buffer`]
+//! should be a command buffer, the command pool from which it is allocated, and
+//! the device they both belong to.) This crate takes advantange of this fact
+//! for additional compile-time checks, such as *external synchronization*.
 //!
 //! ### External Synchronization
-//! This crate maps objects (Like [`Buffer`], [`Fence`], etc.) to *ownership* of the underlying handle.
-//! With this abstraction, a function taking mutable reference to a handle or accepting a handle by
-//! value can assume it is the only thread with access to the handle.
+//! This crate maps objects (Like [`Buffer`], [`Fence`], etc.) to *ownership* of
+//! the underlying handle. With this abstraction, a function taking mutable
+//! reference to a handle or accepting a handle by value can assume it is the
+//! only thread with access to the handle.
 //!
-//! [`PipelineCache`] objects are always worked with by mutable reference, and can thus soundly
-//! be created with or without `EXTERNALLY_SYNCHRONIZED_BIT`
+//! [`PipelineCache`] objects are always worked with by mutable reference, and
+//! can thus soundly be created with or without `EXTERNALLY_SYNCHRONIZED_BIT`
 //!
 //! ## Coverage
-//! This crate does not aim to cover the entire Vulkan API, let alone all its extensions. Primarily,
-//! this will support the subset of the Vulkan API that I find useful and have a good intuition for.
+//! This crate does not aim to cover the entire Vulkan API, let alone all its
+//! extensions. Primarily, this will support the subset of the Vulkan API that I
+//! find useful and have a good intuition for.
 //!
-//! However, since this crate allows for intermixing with raw `ash` calls, all missing features and
-//! extensions can be used, just without the syntactic sugar.
+//! However, since this crate allows for intermixing with raw `ash` calls, all
+//! missing features and extensions can be used, just without the syntactic
+//! sugar.
 //!
 //! Notable exclusions:
 //!  * Compressed/block-based/multiplanar image formats.
@@ -139,8 +151,8 @@ use std::{marker::PhantomData, num::NonZero};
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-/// The unique set of family indices sharing a resource.
-/// Always contains 2 or more indices.
+/// The unique set of family indices sharing a resource. Always contains 2 or
+/// more indices.
 pub struct SharingFamilies<'a>(&'a [u32]);
 impl<'a> SharingFamilies<'a> {
     /// Wrap a set of families.
@@ -190,30 +202,31 @@ impl<'a> SharingFamilies<'a> {
 
         Self(families)
     }
-    /// Get a slice of the queue families.
-    /// Always two or more in length, and all values are unique.
+    /// Get a slice of the queue families. Always two or more in length, and all
+    /// values are unique.
     pub fn families(self) -> &'a [u32] {
         self.0
     }
 }
 #[derive(Clone, Copy)]
 #[repr(i32)]
-/// Whether a resource can be shared between queues or is exclusive to one queue.
+/// Whether a resource can be shared between queues or is exclusive to one
+/// queue.
 pub enum SharingMode<'a> {
-    /// The resource is owned by one queue, and changes of queue are mediated
-    /// by memory barriers.
+    /// The resource is owned by one queue, and changes of queue are mediated by
+    /// memory barriers.
     Exclusive = vk::SharingMode::EXCLUSIVE.as_raw(),
-    /// The resources is shared between several queues, which may concurrently access it
-    /// (synchronization allowing).
+    /// The resources is shared between several queues, which may concurrently
+    /// access it (synchronization allowing).
     ///
     /// The slice *must* contain 2 or more values.
     Concurrent(SharingFamilies<'a>) = vk::SharingMode::CONCURRENT.as_raw(),
 }
 impl<'a> SharingMode<'a> {
     /*
-    /// Create a sharing mode from a slice of families.
-    /// If the number of families is zero or one, [`Self::Exclusive`].
-    /// Otherwise, [`Self::Concurrent`]
+    /// Create a sharing mode from a slice of families. If the number of
+    /// families is zero or one, [`Self::Exclusive`]. Otherwise,
+    /// [`Self::Concurrent`]
     pub fn from_familes(values: &'a [u32]) -> Self {
         match values.len() {
             0 | 1 => Self::Exclusive,
@@ -255,7 +268,8 @@ impl IndexTy for u32 {
 }
 
 /// An error that occurs when the vulkan implementation must allocate memory,
-/// e.g. when creating a new handle (image, buffer, etc.) or begining a command buffer.
+/// e.g. when creating a new handle (image, buffer, etc.) or begining a command
+/// buffer.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum AllocationError {
@@ -274,9 +288,9 @@ impl std::fmt::Display for AllocationError {
     }
 }
 impl AllocationError {
-    /// Convert from a vulkan result code.
-    /// Must be one of `ERROR_OUT_OF_HOST_MEMORY` or `ERROR_OUT_OF_DEVICE_MEMORY` otherwise
-    /// the result is unspecified uwu.
+    /// Convert from a vulkan result code. Must be one of
+    /// `ERROR_OUT_OF_HOST_MEMORY` or `ERROR_OUT_OF_DEVICE_MEMORY` otherwise the
+    /// result is unspecified uwu.
     fn from_vk(value: vk::Result) -> Self {
         // Communicates intent better.
         #[allow(clippy::wildcard_in_or_patterns)]
@@ -306,7 +320,8 @@ macro_rules! typestate_enum {
     };
 }
 /// Create a struct as a thin wrapper around another type, with potentially
-/// several type-state bounds placed in a [`PhantomData`], and implements [`ThinHandle`] on it.
+/// several type-state bounds placed in a [`PhantomData`], and implements
+/// [`ThinHandle`] on it.
 ///
 /// ```
 /// thin_handle!(pub struct SoupHandle<Kind: Soup>(u8));
@@ -338,8 +353,9 @@ macro_rules! thin_handle {
 /// `Self` must be `repr(transparent)` over `Self::Handle`
 pub unsafe trait ThinHandle: Sized {
     type Handle: Copy;
-    // Doesn't work? Always succeeds even when it shouldn't. Weird.
-    // const SOUP: () = assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Self::Handle>(),);
+    // Doesn't work? Always succeeds even when it shouldn't. Weird. const SOUP:
+    // () = assert!(std::mem::size_of::<Self>() ==
+    // std::mem::size_of::<Self::Handle>(),);
 
     /// Get a copy of the underlying handle.
     /// # Safety
@@ -354,8 +370,9 @@ pub unsafe trait ThinHandle: Sized {
     }
     /// Discard the typestate and access the underlying handle.
     ///
-    /// Note that this is still unsafe, as this handle may refer to the same object
-    /// as some other handle, who's typestate must be respected by the caller.
+    /// Note that this is still unsafe, as this handle may refer to the same
+    /// object as some other handle, who's typestate must be respected by the
+    /// caller.
     #[must_use = "dropping the handle may leak resources"]
     unsafe fn into_handle(self) -> Self::Handle {
         unsafe { self.handle() }
@@ -383,10 +400,12 @@ pub unsafe trait ThinHandle: Sized {
         );
         unsafe { (&raw const handle).cast::<Self>().read() }
     }
-    /// Change the typestate of the thin handle. This is a jackhammer to drive a nail, so
-    /// implementors may provide a safe subset of this operation or otherwise constrain it.
+    /// Change the typestate of the thin handle. This is a jackhammer to drive a
+    /// nail, so implementors may provide a safe subset of this operation or
+    /// otherwise constrain it.
     ///
-    /// Usage: ([`Buffer`] implements it's own functions for this, such as [`Buffer::as_subaccess`] just as an example:)
+    /// Usage: ([`Buffer`] implements it's own functions for this, such as
+    /// [`Buffer::as_subaccess`] just as an example:)
     /// ```no_run
     /// let buffer : Buffer<Storage> = todo!();
     /// let vertex_buffer = unsafe { buffer.with_state::<Buffer<Vertex>>() };
@@ -397,10 +416,10 @@ pub unsafe trait ThinHandle: Sized {
     unsafe fn with_state<Other: ThinHandle<Handle = Self::Handle>>(self) -> Other {
         Other::from_handle(self.handle())
     }
-    /// Change the typestate of the thin handle. This is a jackhammer to drive a nail, so
-    /// implementors may provide a safe subset of this operation or otherwise constrain it.
-    /// # Safety
-    /// The handle must be in a state consistent with the typestate of `Other`
+    /// Change the typestate of the thin handle. This is a jackhammer to drive a
+    /// nail, so implementors may provide a safe subset of this operation or
+    /// otherwise constrain it. # Safety The handle must be in a state
+    /// consistent with the typestate of `Other`
     unsafe fn with_state_mut<Other: ThinHandle<Handle = Self::Handle>>(&mut self) -> &mut Other {
         debug_assert_eq!(
             std::mem::size_of::<Self>(),
@@ -408,10 +427,10 @@ pub unsafe trait ThinHandle: Sized {
         );
         std::mem::transmute(self)
     }
-    /// Change the typestate of the thin handle. This is a jackhammer to drive a nail, so
-    /// implementors may provide a safe subset of this operation or otherwise constrain it.
-    /// # Safety
-    /// The handle must be in a state consistent with the typestate of `Other`
+    /// Change the typestate of the thin handle. This is a jackhammer to drive a
+    /// nail, so implementors may provide a safe subset of this operation or
+    /// otherwise constrain it. # Safety The handle must be in a state
+    /// consistent with the typestate of `Other`
     unsafe fn with_state_ref<Other: ThinHandle<Handle = Self::Handle>>(&self) -> &Other {
         debug_assert_eq!(
             std::mem::size_of::<Self>(),
@@ -424,7 +443,8 @@ macro_rules! access_combinations {
     {impl $trait_name:ident for [$(($($name:ident),*$(,)?)),+$(,)?] {
         const $const_name:ident: $const_ty:ty;
     }} => {
-        // Trailing comma to force it to be a tuple type, even for single fields.
+        // Trailing comma to force it to be a tuple type, even for single
+        // fields.
         $(impl<$($name : $trait_name),+> $trait_name for ($($name),*,) {
             const $const_name: $const_ty = <$const_ty>::from_raw($(<$name as $trait_name>::$const_name.as_raw())|*);
         })+
@@ -433,7 +453,8 @@ macro_rules! access_combinations {
 
 /// Compile-time representation of `vkBufferUsageFlags`.
 ///
-/// Flags can be a single aspect, [`Storage`], or can be placed in a tuple to combine them: `(Storage, Vertex, Indirect)`
+/// Flags can be a single aspect, [`Storage`], or can be placed in a tuple to
+/// combine them: `(Storage, Vertex, Indirect)`
 pub trait BufferAccess: 'static {
     /// The bitflags for this buffer usage combination.
     const FLAGS: vk::BufferUsageFlags;
@@ -463,7 +484,8 @@ pub struct TransferDst;
 impl BufferAccess for TransferDst {
     const FLAGS: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_DST;
 }
-/// A buffer that can be used as the source for dispatch or draw indirection commands.
+/// A buffer that can be used as the source for dispatch or draw indirection
+/// commands.
 pub struct Indirect;
 impl BufferAccess for Indirect {
     const FLAGS: vk::BufferUsageFlags = vk::BufferUsageFlags::INDIRECT_BUFFER;
@@ -489,7 +511,8 @@ access_combinations! {
 
 /// Compile-time representation of `vkImageUsageFlags`.
 ///
-/// Flags can be a single aspect, [`Storage`], or can be placed in a tuple to combine them: `(Storage, Sampled, ColorAttachment)`
+/// Flags can be a single aspect, [`Storage`], or can be placed in a tuple to
+/// combine them: `(Storage, Sampled, ColorAttachment)`
 pub trait ImageAccess: 'static {
     /// The bitflags for this image usage combination.
     const FLAGS: vk::ImageUsageFlags;
@@ -513,12 +536,14 @@ pub struct ColorAttachment;
 impl ImageAccess for ColorAttachment {
     const FLAGS: vk::ImageUsageFlags = vk::ImageUsageFlags::COLOR_ATTACHMENT;
 }
-/// An image that can be attached to a Framebuffer as a depth and/or stencil attachment.
+/// An image that can be attached to a Framebuffer as a depth and/or stencil
+/// attachment.
 pub struct DepthStencilAttachment;
 impl ImageAccess for Uniform {
     const FLAGS: vk::ImageUsageFlags = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
 }
-/// An image that can be attached to a Framebuffer for transient render operations.
+/// An image that can be attached to a Framebuffer for transient render
+/// operations.
 pub struct TransientAttachment;
 impl ImageAccess for TransientAttachment {
     const FLAGS: vk::ImageUsageFlags = vk::ImageUsageFlags::TRANSIENT_ATTACHMENT;
@@ -551,8 +576,8 @@ impl Satisified for Pred<true> {}
 ///
 /// Buffers can be safely reinterpreted as a buffer of a subset of usages.
 ///
-/// For example, `(Index, Vertex, Uniform)` is `BufferSuperset<(Uniform, Vertex)>`,
-/// but is not `BufferSuperset<(Indirect, Vertex)>`
+/// For example, `(Index, Vertex, Uniform)` is `BufferSuperset<(Uniform,
+/// Vertex)>`, but is not `BufferSuperset<(Indirect, Vertex)>`
 pub unsafe trait BufferSuperset<Sub: BufferAccess>: BufferAccess {}
 
 unsafe impl<Super, Sub> BufferSuperset<Sub> for Super
@@ -566,8 +591,8 @@ where
 ///
 /// Images can be safely reinterpreted as a image of a subset of usages.
 ///
-/// For example, `(Storage, TransferSrc)` is `BufferSuperset<(Storage,)>`,
-/// but is not `BufferSuperset<(TransferDst, TransferSrc)>`
+/// For example, `(Storage, TransferSrc)` is `BufferSuperset<(Storage,)>`, but
+/// is not `BufferSuperset<(TransferDst, TransferSrc)>`
 pub unsafe trait ImageSuperset<Sub: ImageAccess>: ImageAccess {}
 unsafe impl<Super, Sub> ImageSuperset<Sub> for Super
 where
@@ -579,11 +604,11 @@ where
 
 /// A trait representing the extent of a image of various dimensionalities.
 pub unsafe trait Extent {
-    /// The dimensionality of the extent represented by this type.
-    /// For example, 2D Array has dimensionality 2.
+    /// The dimensionality of the extent represented by this type. For example,
+    /// 2D Array has dimensionality 2.
     type Dim: Dimensionality;
-    /// The extrapolated extent3D.
-    /// All dimensions must be non-zero. Axes beyond the type's dimensionality should be `1`.
+    /// The extrapolated extent3D. All dimensions must be non-zero. Axes beyond
+    /// the type's dimensionality should be `1`.
     fn extent(&self) -> vk::Extent3D;
     /// The number of layers, or 1 if not a layered type.
     fn layers(&self) -> NonZero<u32>;
@@ -592,11 +617,11 @@ pub unsafe trait Extent {
 pub trait Offset {
     /// The value represeting the `(0, 0, 0)` point.
     const ORIGIN: Self;
-    /// The dimensionality of the extent represented by this type.
-    /// For example, 2D Array has dimensionality 2.
+    /// The dimensionality of the extent represented by this type. For example,
+    /// 2D Array has dimensionality 2.
     type Dim: Dimensionality;
-    /// The extrapolated extent3D.
-    /// All dimensions must be non-zero. Axes beyond the type's dimensionality should be `1`.
+    /// The extrapolated extent3D. All dimensions must be non-zero. Axes beyond
+    /// the type's dimensionality should be `1`.
     fn offset(&self) -> vk::Offset3D;
 }
 pub struct Offset1D(pub i32);
@@ -798,50 +823,58 @@ pub trait Dimensionality {
     type SubresourceLayers: SubresourceLayers;
     /// An offset into an image of this dimensionality.
     type Offset: Offset;
-    /// How an N-dimensional image's addresses should be translated into 1-dimensional buffer
-    /// addresses.
+    /// How an N-dimensional image's addresses should be translated into
+    /// 1-dimensional buffer addresses.
     type Pitch: BufferPitch;
     /// Vulkan representation of this dimensionality.
     const TYPE: vk::ImageType;
 }
 /// The data needed for addressing calculations in buffer-image copies.
 pub trait BufferPitch {
-    /// The value representing that the vulkan implementation should assume tight
-    /// packing between rows and slices, i.e. where [`BufferPitch::row_pitch`] and
-    /// [`BufferPitch::slice_pitch`] are both `None`.
+    /// The value representing that the vulkan implementation should assume
+    /// tight packing between rows and slices, i.e. where
+    /// [`BufferPitch::row_pitch`] and [`BufferPitch::slice_pitch`] are both
+    /// `None`.
     const PACKED: Self;
-    /// The distance in *texels* (not bytes!) between the start of one row and the start
-    /// of the next, or `None` for tight packing (i.e. the `width` of the image).
+    /// The distance in *texels* (not bytes!) between the start of one row and
+    /// the start of the next, or `None` for tight packing (i.e. the `width` of
+    /// the image).
     ///
     /// If not applicable for this type, `None` should be returned.
     fn row_pitch(&self) -> Option<NonZero<u32>>;
-    /// The distance in *texels* (not bytes!) between the start of one 2D slice of a 3D image or 2D array image
-    /// and the start of the next, or `None` for tight packing (i.e. the `width * height` of the image)
+    /// The distance in *texels* (not bytes!) between the start of one 2D slice
+    /// of a 3D image or 2D array image and the start of the next, or `None` for
+    /// tight packing (i.e. the `width * height` of the image)
     ///
     /// If not applicable for this type, `None` should be returned.
     fn slice_pitch(&self) -> Option<NonZero<u32>>;
 }
-/// Controls buffer addressing for image operations where only one 2D image slice is involved.
+/// Controls buffer addressing for image operations where only one 2D image
+/// slice is involved.
 ///
-/// The distance in *texels* (not bytes!) between the start of one row and the start
-/// of the next, or `None` for tight packing (i.e. the `width` of the image)
+/// The distance in *texels* (not bytes!) between the start of one row and the
+/// start of the next, or `None` for tight packing (i.e. the `width` of the
+/// image)
 ///
-/// If not None, must be >= the tight packed pitch (rows must not alias, even for
-/// a read-only operation)
+/// If not None, must be >= the tight packed pitch (rows must not alias, even
+/// for a read-only operation)
 pub struct RowPitch(pub Option<NonZero<u32>>);
-/// Controls buffer addressing for image operations where several 2D image slices are involved.
+/// Controls buffer addressing for image operations where several 2D image
+/// slices are involved.
 pub struct RowSlicePitch {
-    /// The distance in *texels* (not bytes!) between the start of one row and the start
-    /// of the next, or `None` for tight packing (i.e. the `width` of the image)
+    /// The distance in *texels* (not bytes!) between the start of one row and
+    /// the start of the next, or `None` for tight packing (i.e. the `width` of
+    /// the image)
     ///
-    /// If not None, must be >= the tight packed pitch (rows must not alias, even for
-    /// a read-only operation)
+    /// If not None, must be >= the tight packed pitch (rows must not alias,
+    /// even for a read-only operation)
     pub row_pitch: Option<NonZero<u32>>,
-    /// The distance in *texels* (not bytes!) between the start of one 2D slice of a 3D image or 2D array image
-    /// and the start of the next, or `None` for tight packing (i.e. the `width * height` of the image)
+    /// The distance in *texels* (not bytes!) between the start of one 2D slice
+    /// of a 3D image or 2D array image and the start of the next, or `None` for
+    /// tight packing (i.e. the `width * height` of the image)
     ///
-    /// If not None, must be >= the tight packed pitch (slices must not alias, even for
-    /// a read-only operation)
+    /// If not None, must be >= the tight packed pitch (slices must not alias,
+    /// even for a read-only operation)
     pub slice_pitch: Option<NonZero<u32>>,
 }
 
@@ -949,10 +982,9 @@ pub struct SubresourceMipArray {
 impl SubresourceMipArray {
     /// Reference a span of layers at a given mip level.
     ///
-    /// If a range is specified without an end, e.g. `0..`, `VK_REMAINING_LAYERS`
-    /// is specified.
-    /// # Panics
-    /// If layers is an inverted or empty range.
+    /// If a range is specified without an end, e.g. `0..`,
+    /// `VK_REMAINING_LAYERS` is specified. # Panics If layers is an inverted or
+    /// empty range.
     pub fn new(mip: u32, layers: impl std::ops::RangeBounds<u32>) -> Self {
         let start_layer = match layers.start_bound() {
             std::ops::Bound::Excluded(&a) => a.checked_add(1).unwrap(),
@@ -962,7 +994,8 @@ impl SubresourceMipArray {
         let layer_count = match layers.end_bound() {
             std::ops::Bound::Excluded(&end) => {
                 assert!(start_layer < end);
-                // Safety - just checked that end is strictly larger, therefore a difference >= 1.
+                // Safety - just checked that end is strictly larger, therefore
+                // a difference >= 1.
                 unsafe { NonZero::new_unchecked(end - start_layer) }
             }
             std::ops::Bound::Included(&end) => {
@@ -1031,16 +1064,16 @@ pub unsafe trait ImageSamples {
     fn flag(self) -> vk::SampleCountFlags;
 }
 #[derive(Clone, Copy)]
-/// Typestate for an image which has one sample per pixel.
-/// See also [`MultiSampled`].
+/// Typestate for an image which has one sample per pixel. See also
+/// [`MultiSampled`].
 pub struct SingleSampled;
 unsafe impl ImageSamples for SingleSampled {
     fn flag(self) -> vk::SampleCountFlags {
         vk::SampleCountFlags::TYPE_1
     }
 }
-/// Typestate for an image which has more than one sample.
-/// See also [`SingleSampled`].
+/// Typestate for an image which has more than one sample. See also
+/// [`SingleSampled`].
 #[repr(u32)]
 #[derive(Clone, Copy)]
 pub enum MultiSampled {
@@ -1059,10 +1092,14 @@ unsafe impl ImageSamples for MultiSampled {
 
 /// An owned image handle.
 /// # Typestates
-/// * `Access`: The `VkImageUsageFlags` this image is statically known to possess (e.g. `(Storage, TransferSrc)`)
-/// * `Dim`: The dimensionality of an image, including whether it is an array of images (e.g. [`D2`])
-/// * `Format`: The Image aspects this image's format is known to possess (e.g. [`ColorFormat`]).
-/// * `Samples`: Whether the image is [single-](SingleSampled) or [multi-](MultiSampled)sampled.
+/// * `Access`: The `VkImageUsageFlags` this image is statically known to
+///   possess (e.g. `(Storage, TransferSrc)`)
+/// * `Dim`: The dimensionality of an image, including whether it is an array of
+///   images (e.g. [`D2`])
+/// * `Format`: The Image aspects this image's format is known to possess (e.g.
+///   [`ColorFormat`]).
+/// * `Samples`: Whether the image is [single-](SingleSampled) or
+///   [multi-](MultiSampled)sampled.
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the image and may leak resources"]
 pub struct Image<
@@ -1079,10 +1116,13 @@ unsafe impl<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat, Sampl
 
 /// An owned image view handle.
 /// # Typestates
-/// * `Access`: The `VkImageUsageFlags` this image is statically known to possess (e.g. `(Storage, TransferSrc)`),
-///   which is a subset of the usages of the parent [`Image`].
-/// * `Dim`: The dimensionality of an image, including whether it is an array of images (e.g. [`D2`])
-/// * `Format`: The Image aspects this image's format is known to possess (e.g. [`ColorFormat`]).
+/// * `Access`: The `VkImageUsageFlags` this image is statically known to
+///   possess (e.g. `(Storage, TransferSrc)`), which is a subset of the usages
+///   of the parent [`Image`].
+/// * `Dim`: The dimensionality of an image, including whether it is an array of
+///   images (e.g. [`D2`])
+/// * `Format`: The Image aspects this image's format is known to possess (e.g.
+///   [`ColorFormat`]).
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the view and may leak resources"]
 pub struct ImageView<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat>(
@@ -1097,7 +1137,8 @@ unsafe impl<Access: ImageAccess, Dim: Dimensionality, Format: ImageFormat> ThinH
 
 /// An owned image view handle.
 /// # Typestates
-/// * `Access`: The `vkBufferUsageFlags` this image is statically known to possess (e.g. `(Storage, TransferSrc)`)
+/// * `Access`: The `vkBufferUsageFlags` this image is statically known to
+///   possess (e.g. `(Storage, TransferSrc)`)
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the buffer and may leak resources"]
 pub struct Buffer<Access: BufferAccess>(vk::Buffer, PhantomData<Access>);
@@ -1120,28 +1161,30 @@ impl<SubAccess: BufferAccess, SuperAccess: BufferSuperset<SubAccess> + BufferAcc
 }
 
 impl<Access: BufferAccess> Buffer<Access> {
-    /// Forget some of the access types. To bring back the forgotten types, the *unsafe*
-    /// function [`Self::into_access_unchecked`] can be used.
+    /// Forget some of the access types. To bring back the forgotten types, the
+    /// *unsafe* function [`Self::into_access_unchecked`] can be used.
     ///
-    /// Use [`Self::as_subaccess`] or [`Self::as_subaccess_mut`] to get temporary subaccess without
-    /// forgetting the original flags.
+    /// Use [`Self::as_subaccess`] or [`Self::as_subaccess_mut`] to get
+    /// temporary subaccess without forgetting the original flags.
     /// # Compiler Errors
-    /// If you see `expected false, found true` as an error, that means
-    /// the `SubAccess` flags is not statically known to be a subtype of this buffer's Access flags.
-    /// I do not know how to make a better error :3
+    /// If you see `expected false, found true` as an error, that means the
+    /// `SubAccess` flags is not statically known to be a subtype of this
+    /// buffer's Access flags. I do not know how to make a better error :3
     pub fn into_subaccess<SubAccess>(self) -> Buffer<SubAccess>
     where
         SubAccess: BufferAccess,
         Access: BufferSuperset<SubAccess>,
     {
-        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a* Buffer<SubAccess>.
+        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a*
+        // Buffer<SubAccess>.
         unsafe { self.with_state() }
     }
     pub fn reference<SubAccess: BufferAccess>(&self) -> BufferReference<SubAccess>
     where
         Access: BufferSuperset<SubAccess>,
     {
-        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a* Buffer<SubAccess>.
+        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a*
+        // Buffer<SubAccess>.
         unsafe { BufferReference::from_handle(self.handle()) }
     }
     pub fn as_subaccess<SubAccess>(&self) -> &Buffer<SubAccess>
@@ -1149,7 +1192,8 @@ impl<Access: BufferAccess> Buffer<Access> {
         SubAccess: BufferAccess,
         Access: BufferSuperset<SubAccess>,
     {
-        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a* Buffer<SubAccess>.
+        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a*
+        // Buffer<SubAccess>.
         unsafe { self.with_state_ref() }
     }
     pub fn as_subaccess_mut<SubAccess>(&mut self) -> &mut Buffer<SubAccess>
@@ -1157,21 +1201,25 @@ impl<Access: BufferAccess> Buffer<Access> {
         SubAccess: BufferAccess,
         Access: BufferSuperset<SubAccess>,
     {
-        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a* Buffer<SubAccess>.
+        // Safety: Subset<> bound guarantees Buffer<SuperAccess> *is a*
+        // Buffer<SubAccess>.
         unsafe { self.with_state_mut() }
     }
     /// Convert the type into a different kind of access.
     /// # Safety
-    /// The buffer cannot be used for any kind of access that wasn't specified at creation time.
+    /// The buffer cannot be used for any kind of access that wasn't specified
+    /// at creation time.
     pub unsafe fn into_access_unchecked<NewAccess: BufferAccess>(self) -> Buffer<NewAccess> {
         // Safety: Forwarded to caller.
         unsafe { self.with_state() }
     }
 }
-/// A thin, shared reference to a [`Buffer`] with some subset of usages. Acquired using [`Buffer::reference`].
+/// A thin, shared reference to a [`Buffer`] with some subset of usages.
+/// Acquired using [`Buffer::reference`].
 ///
-/// This is used anywhere where vulkan expects a slice of buffers, where `&[&Buffer]` is one layer of
-/// indirection too deep to be directly handed off to the implementation.
+/// This is used anywhere where vulkan expects a slice of buffers, where
+/// `&[&Buffer]` is one layer of indirection too deep to be directly handed off
+/// to the implementation.
 #[repr(transparent)]
 pub struct BufferReference<'a, Access: BufferAccess>(
     vk::Buffer,
@@ -1184,9 +1232,11 @@ unsafe impl<Access: BufferAccess> ThinHandle for BufferReference<'_, Access> {
 
 /// A Vulkan "Logical Device," and all associated function pointers.
 ///
-/// This contains all the function pointers needed to operate. All device-scope operations go through this object.
+/// This contains all the function pointers needed to operate. All device-scope
+/// operations go through this object.
 ///
-/// To create one, acquire an [`ash::Device`] as documented by `ash` and pass it to [`Device::from_ash`].
+/// To create one, acquire an [`ash::Device`] as documented by `ash` and pass it
+/// to [`Device::from_ash`].
 pub struct Device<'a>(&'a ash::Device);
 
 thin_handle! {
@@ -1202,20 +1252,21 @@ impl FenceState for Signaled {}
 impl KnownFenceState for Signaled {
     const CREATION_FLAGS: vk::FenceCreateFlags = vk::FenceCreateFlags::SIGNALED;
 }
-/// Typestate for a [`Fence`] or [`Semaphore`] which is currently unsignaled and not in the process of becoming
-/// signaled.
+/// Typestate for a [`Fence`] or [`Semaphore`] which is currently unsignaled and
+/// not in the process of becoming signaled.
 pub struct Unsignaled;
 impl FenceState for Unsignaled {}
 impl KnownFenceState for Unsignaled {
     const CREATION_FLAGS: vk::FenceCreateFlags = vk::FenceCreateFlags::empty();
 }
-/// Typestate for a [`Fence`] or [`Semaphore`] which is eventually going to become signaled due to a previous
-/// queue submission operation.
+/// Typestate for a [`Fence`] or [`Semaphore`] which is eventually going to
+/// become signaled due to a previous queue submission operation.
 pub struct Pending;
 impl FenceState for Pending {}
 /// A synchronization primitive for GPU->CPU communication.
 /// # Typestate
-/// * `State`: Whether the fence is signaled, unsignaled, or in the process of becoming signaled.
+/// * `State`: Whether the fence is signaled, unsignaled, or in the process of
+///   becoming signaled.
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the fence and may leak resources"]
 pub struct Fence<State: FenceState>(vk::Fence, PhantomData<State>);
@@ -1224,7 +1275,8 @@ unsafe impl<State: FenceState> ThinHandle for Fence<State> {
     type Handle = vk::Fence;
 }
 thin_handle! {
-    /// A synchronization primitive for CPU->GPU communication and fine-grained *intra*-queue GPU->GPU dependencies.
+    /// A synchronization primitive for CPU->GPU communication and fine-grained
+    /// *intra*-queue GPU->GPU dependencies.
     #[must_use = "dropping the handle will not destroy the event and may leak resources"]
     pub struct Event(vk::Event);
 }
@@ -1232,7 +1284,8 @@ thin_handle! {
 typestate_enum! {
     /// Typestate indicating whether a semaphore is pending a signal.
     pub enum trait SemaphoreState {
-        /// Typestate for a semaphore with a strictly increasing value instead of a boolean payload.
+        /// Typestate for a semaphore with a strictly increasing value instead
+        /// of a boolean payload.
         pub struct Timeline,
     }
 }
@@ -1240,21 +1293,22 @@ impl SemaphoreState for Pending {}
 impl SemaphoreState for Unsignaled {}
 
 thin_handle! {
-    /// A synchronization primitive for GPU->GPU communication and coarse-grained inter-queue
-    /// dependencies.
+    /// A synchronization primitive for GPU->GPU communication and
+    /// coarse-grained inter-queue dependencies.
     /// # Typestate
-    /// * [`State`](SemaphoreState): Describes whether a signal operation on this sempahore is
-    ///   pending, and thus whether it can be waited on.
-    ///   * The "Signaled" state that fences have is missing, as the act of observing a semaphore in
-    ///     the Signaled state immediately sets it to the unsignaled state, thus transitioning
-    ///     directly from Pending->Unsignaled.
+    /// * [`State`](SemaphoreState): Describes whether a signal operation on
+    ///   this sempahore is pending, and thus whether it can be waited on.
+    ///   * The "Signaled" state that fences have is missing, as the act of
+    ///     observing a semaphore in the Signaled state immediately sets it to
+    ///     the unsignaled state, thus transitioning directly from
+    ///     Pending->Unsignaled.
     #[must_use = "dropping the handle will not destroy the semaphore and may leak resources"]
     pub struct Semaphore<State: SemaphoreState>(vk::Semaphore);
 }
 
 thin_handle! {
-    /// A pool from which many [`CommandBuffer`]s may be allocated.
-    /// Any operation on any command buffer allocated from this pool requires
+    /// A pool from which many [`CommandBuffer`]s may be allocated. Any
+    /// operation on any command buffer allocated from this pool requires
     /// synchronous access to the pool as well.
     #[must_use = "dropping the handle will not destroy the command pool and may leak resources"]
     pub struct CommandPool(vk::CommandPool);
@@ -1268,7 +1322,8 @@ pub struct Primary;
 impl CommandBufferLevel for Primary {
     const LEVEL: vk::CommandBufferLevel = vk::CommandBufferLevel::PRIMARY;
 }
-/// A second command buffer, exectuted indirectly by being "called" by [`Primary`] command buffers.
+/// A second command buffer, exectuted indirectly by being "called" by
+/// [`Primary`] command buffers.
 pub struct Secondary;
 impl CommandBufferLevel for Secondary {
     const LEVEL: vk::CommandBufferLevel = vk::CommandBufferLevel::SECONDARY;
@@ -1277,10 +1332,12 @@ impl CommandBufferLevel for Secondary {
 thin_handle! {
     /// A command buffer, allocated from a [`CommandPool`].
     ///
-    /// All operations require synchronous access to this buffer, as well as the pool it was allocated from.
+    /// All operations require synchronous access to this buffer, as well as the
+    /// pool it was allocated from.
     /// # Typestates
-    /// * `Level` - [`Primary`] or [`Secondary`], describing the allocation kind, which restricts
-    ///   the operations that can be recorded into the buffer.
+    /// * `Level` - [`Primary`] or [`Secondary`], describing the allocation
+    ///   kind, which restricts the operations that can be recorded into the
+    ///   buffer.
     #[must_use = "dropping the handle will not deallocate the buffer and may leak resources"]
     pub struct CommandBuffer<Level: CommandBufferLevel>(vk::CommandBuffer);
 }
@@ -1307,9 +1364,11 @@ impl<'a, Level: CommandBufferLevel> From<&'a CommandBuffer<Level>>
 }
 thin_handle! {
     /// A block of shader code that has been forwarded to the implementation.
-    /// Includes one or more "entry points" of possibly heterogeneous shader stages.
+    /// Includes one or more "entry points" of possibly heterogeneous shader
+    /// stages.
     ///
-    /// Use [`Self::entry`] to reference a specific entry point for use in a pipeline.
+    /// Use [`Self::entry`] to reference a specific entry point for use in a
+    /// pipeline.
     #[must_use = "dropping the handle will not deallocate the module and may leak resources"]
     pub struct ShaderModule(vk::ShaderModule);
 }
@@ -1378,7 +1437,8 @@ impl ShaderModule {
     }
 }
 
-/// A reference to a shader module, bundled with an entry point name and the stage of said entry point.
+/// A reference to a shader module, bundled with an entry point name and the
+/// stage of said entry point.
 ///
 /// Created by [`ShaderModule::entry`].
 /// # Typestates
@@ -1392,14 +1452,16 @@ pub struct Entry<'a, Stage: ShaderStage> {
 impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
     /// Provide constants to the shader compiler.
     ///
-    /// If your shader does not use specialization, you can specialize on the unit type:
-    /// ```no_run
+    /// If your shader does not use specialization, you can specialize on the
+    /// unit type: ```no_run
     /// # let module : ShaderModule = todo!();
     /// let specialized_entry = module.main().specialize(());
     /// ```
     /// # Safety
-    /// * Every constant necessary for a complete module entry point must be populated by the [entries](Specialization::ENTRIES) of `S`.
-    /// * Every types required by the shader must match the types provided by `S`
+    /// * Every constant necessary for a complete module entry point must be
+    ///   populated by the [entries](Specialization::ENTRIES) of `S`.
+    /// * Every types required by the shader must match the types provided by
+    ///   `S`
     pub unsafe fn specialize<S: Specialization>(
         self,
         specialization: &'a S,
@@ -1417,8 +1479,9 @@ impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
     }
 }
 
-/// A reference to a shader module, bundled with an entry point name, the stage of said entry point, and
-/// the specialization constants needed to make it concrete.
+/// A reference to a shader module, bundled with an entry point name, the stage
+/// of said entry point, and the specialization constants needed to make it
+/// concrete.
 ///
 /// Created by [`Entry::specialize`].
 /// # Typestates
@@ -1429,8 +1492,7 @@ pub struct SpecializedEntry<'a, Stage: ShaderStage> {
     // &dyn but funny
     specialization_info: vk::SpecializationInfo<'a>,
     // specialization_map: &'a [vk::SpecializationMapEntry],
-    // specialization_data: *const u8,
-    // specialization_size: usize,
+    // specialization_data: *const u8, specialization_size: usize,
     _marker: PhantomData<(&'a ShaderModule, Stage)>,
 }
 impl<'a, Stage: ShaderStage> SpecializedEntry<'a, Stage> {
@@ -1455,7 +1517,8 @@ impl<'a, Stage: ShaderStage> SpecializedEntry<'a, Stage> {
 /// * Each entry in `ENTRIES` must refer to a range inside the bounds of `Self`.
 /// * Each range in `Self` referred to by `ENTRIES` must be a valid value of the
 ///   type the shader expects.
-///   * This req sucks uwu. Basically the layout of this structure and the shader *must* agree.
+///   * This req sucks uwu. Basically the layout of this structure and the
+///     shader *must* agree.
 pub unsafe trait Specialization {
     const ENTRIES: &'static [vk::SpecializationMapEntry];
 }
@@ -1552,8 +1615,8 @@ impl<'a> From<&'a PipelineCache> for BorrowedPipelineCache<'a> {
         unsafe { Self::from_handle(value.handle()) }
     }
 }
-/// A type usable for pipeline push constants, consisting of several static ranges pointing to members
-/// of `self`.
+/// A type usable for pipeline push constants, consisting of several static
+/// ranges pointing to members of `self`.
 ///
 /// # Safety
 /// * For all ranges, `offsets + size <= size_of::<Self>()`.
@@ -1568,7 +1631,8 @@ unsafe impl ThinHandle for BorrowedPipelineCache<'_> {
 }
 thin_handle! {
     /// # Typestates
-    /// - `Constants`: The set of push constant ranges needed for pipelines of this layout.
+    /// - `Constants`: The set of push constant ranges needed for pipelines of
+    ///   this layout.
     pub struct PipelineLayout<Constants: PushConstant>(vk::PipelineLayout);
 }
 
@@ -1580,7 +1644,8 @@ pub struct ComputePipelineCreateInfo<'a> {
 /// A render pass, describing the flow of rendering operations on a Framebuffer.
 ///
 /// # Typestates
-/// * `SUBPASSES` - A non-zero integer representing the number of subpasses this renderpass consists of.
+/// * `SUBPASSES` - A non-zero integer representing the number of subpasses this
+///   renderpass consists of.
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the renderpass and may leak resources"]
 pub struct RenderPass<const SUBPASSES: usize>(vk::RenderPass)
@@ -1615,9 +1680,9 @@ impl std::fmt::Display for SubmitError {
     }
 }
 impl SubmitError {
-    /// Convert from a vulkan result code.
-    /// Must be one of `ERROR_OUT_OF_HOST_MEMORY`, `ERROR_OUT_OF_DEVICE_MEMORY`, or `ERROR_DEVICE_LOST`, otherwise
-    /// the result is unspecified uwu.
+    /// Convert from a vulkan result code. Must be one of
+    /// `ERROR_OUT_OF_HOST_MEMORY`, `ERROR_OUT_OF_DEVICE_MEMORY`, or
+    /// `ERROR_DEVICE_LOST`, otherwise the result is unspecified uwu.
     fn from_vk(value: vk::Result) -> Self {
         // Communicates intent better.
         #[allow(clippy::wildcard_in_or_patterns)]
@@ -1641,9 +1706,9 @@ pub enum Timeout {
     /// Wait the specified number of nanoseconds. The resolution is unspecified,
     /// and the implementation may wait longer or shorter than the given time.
     Nanos(NonZero<u64>),
-    /// Wait forever, until signaled or an error occurs.
-    /// If you're using this statically, consider using the non-timeout variant of the call
-    /// which provides better type-level information.
+    /// Wait forever, until signaled or an error occurs. If you're using this
+    /// statically, consider using the non-timeout variant of the call which
+    /// provides better type-level information.
     Infinite,
 }
 impl Timeout {
@@ -1656,8 +1721,8 @@ impl Timeout {
     }
 }
 
-/// A thin handle (an image, a fence, etc.) that has been associated with a device and
-/// can thus have its own associated functions.
+/// A thin handle (an image, a fence, etc.) that has been associated with a
+/// device and can thus have its own associated functions.
 ///
 /// Use [`Device::bind`] to acquire.
 pub struct Bound<'device, T: ThinHandle>(T, &'device Device<'device>);
@@ -1710,8 +1775,8 @@ pub struct BufferImageCopy<Dim: Dimensionality> {
 typestate_enum! {
     /// Typestates for host-visibility of memory.
     ///
-    /// Device-locality is not expressed on a typestate level as it has
-    /// no implications for correct usage.
+    /// Device-locality is not expressed on a typestate level as it has no
+    /// implications for correct usage.
     pub enum trait MemoryAccess {
         /// Typestate for memory which is host-visible and coherent.
         ///
@@ -1719,11 +1784,11 @@ typestate_enum! {
         pub struct HostCoherent,
         /// Typestate for memory which is host-visible and cached.
         ///
-        /// Cached accesses are generally faster than uncached accesses, though they are not always
-        /// [coherent](HostCoherent).
+        /// Cached accesses are generally faster than uncached accesses, though
+        /// they are not always [coherent](HostCoherent).
         pub struct HostCached,
-        /// Typestate for memory which is host visible and both [cached](HostCached) and
-        /// [coherent](HostCoherent).
+        /// Typestate for memory which is host visible and both
+        /// [cached](HostCached) and [coherent](HostCoherent).
         pub struct HostCachedCoherent,
         /// Typestate for memory which is not host-visible.
         pub struct Inaccessable,
@@ -1751,12 +1816,13 @@ pub struct SubmitWithFence<const WAITS: usize, const SIGNALS: usize> {
 }
 
 impl<'device> Device<'device> {
-    /// Bundle a handle with a device pointer, allowing the handle to
-    /// have it's own associated functions and making method chaining possible even
+    /// Bundle a handle with a device pointer, allowing the handle to have it's
+    /// own associated functions and making method chaining possible even
     /// through several operations which change the type of it's operand.
     ///
-    /// Generally, if an operation takes only the device and the handle and returns either,
-    /// it can be executed using a [`Bound`] handle for cleaner syntax.
+    /// Generally, if an operation takes only the device and the handle and
+    /// returns either, it can be executed using a [`Bound`] handle for cleaner
+    /// syntax.
     ///
     /// This is a zero-cost operation.
     ///
@@ -1786,11 +1852,10 @@ impl<'device> Device<'device> {
     pub fn from_ash(device: &'device ash::Device) -> Self {
         Device(device)
     }
-    /// Submit work to a queue.
-    /// The fence will be signaled upon completion.
+    /// Submit work to a queue. The fence will be signaled upon completion.
     ///
-    /// FIXME: this only allows for one batch at a time. While I believe this is at no loss of
-    /// generality, it is at a *major* loss in performance.
+    /// FIXME: this only allows for one batch at a time. While I believe this is
+    /// at no loss of generality, it is at a *major* loss in performance.
     /// # Panics
     /// If `buffers` is empty.
     pub unsafe fn submit_with_fence<const WAITS: usize, const SIGNALS: usize>(
@@ -1801,8 +1866,9 @@ impl<'device> Device<'device> {
         signal_semaphores: [Semaphore<Unsignaled>; SIGNALS],
         signal_fence: Fence<Unsignaled>,
     ) -> Result<SubmitWithFence<WAITS, SIGNALS>, SubmitError> {
-        // Usually we can just silently ignore it and return Ok(()), however we have no way to issue
-        // adummy wait/signal operations to all the necessary fences and semaphores.
+        // Usually we can just silently ignore it and return Ok(()), however we
+        // have no way to issue adummy wait/signal operations to all the
+        // necessary fences and semaphores.
         assert_ne!(buffers.len(), 0);
         self.0
             .queue_submit(
@@ -1825,19 +1891,21 @@ impl<'device> Device<'device> {
             signal_fence: signal_fence.with_state(),
         })
     }
-    /// Wait for a queue to complete all prior submissions, *as if* a fence on all prior
-    /// submissions had been waited on.
+    /// Wait for a queue to complete all prior submissions, *as if* a fence on
+    /// all prior submissions had been waited on.
     pub unsafe fn queue_wait_idle(&self, queue: &mut Queue) -> Result<(), SubmitError> {
         self.0
             .queue_wait_idle(queue.handle())
             .map_err(SubmitError::from_vk)
     }
-    /// *As if* all queues owned by the device had `queue_wait_idle` called on them.
-    /// # Safety
-    /// * Requires *unique* (mutable) access to all device queues for the duration of the call.
+    /// *As if* all queues owned by the device had `queue_wait_idle` called on
+    /// them. # Safety
+    /// * Requires *unique* (mutable) access to all device queues for the
+    ///   duration of the call.
     ///
-    /// This cannot currently be proven at compile time. Passing mutable references to *all*
-    /// queues allows it to be checked, but it cannot be proven that all queues are present.
+    /// This cannot currently be proven at compile time. Passing mutable
+    /// references to *all* queues allows it to be checked, but it cannot be
+    /// proven that all queues are present.
     pub unsafe fn wait_idle(&self, _queues: &mut [&mut Queue]) -> Result<(), SubmitError> {
         self.0.device_wait_idle().map_err(SubmitError::from_vk)
     }
@@ -1879,16 +1947,16 @@ impl<'device> Device<'device> {
             .map(|handle| self.bind(handle))
             .map_err(AllocationError::from_vk)
     }
-    /// Set each fence to the "Unsignaled" state. It is valid to reset an already unsignaled
-    /// fence.
+    /// Set each fence to the "Unsignaled" state. It is valid to reset an
+    /// already unsignaled fence.
     pub unsafe fn reset_fence<State: KnownFenceState>(
         &self,
         fence: Fence<State>,
     ) -> Result<Fence<Unsignaled>, AllocationError> {
         self.reset_fences([fence]).map(|[fence]| fence)
     }
-    /// Set each fence to the "Unsignaled" state. It is valid to reset an already unsignaled
-    /// fence.
+    /// Set each fence to the "Unsignaled" state. It is valid to reset an
+    /// already unsignaled fence.
     pub unsafe fn reset_fences<const N: usize, State: KnownFenceState>(
         &self,
         fences: [Fence<State>; N],
@@ -1898,8 +1966,8 @@ impl<'device> Device<'device> {
             .map_err(AllocationError::from_vk)?;
         Ok(fences.map(|f| Fence::with_state(f)))
     }
-    /// Poll the fence. If the result is [`FencePoll::Unsignaled`], the result *may* be immediately
-    /// out-of-date.
+    /// Poll the fence. If the result is [`FencePoll::Unsignaled`], the result
+    /// *may* be immediately out-of-date.
     pub unsafe fn fence_status(
         &self,
         fence: Fence<Pending>,
@@ -1915,7 +1983,8 @@ impl<'device> Device<'device> {
             FencePoll::Unsignaled(Fence::from_handle(handle))
         })
     }
-    /// Convinience wrapper around [`Self::wait_all_fences_timeout`] for once fence.
+    /// Convinience wrapper around [`Self::wait_all_fences_timeout`] for once
+    /// fence.
     pub unsafe fn wait_fence_timeout(
         &self,
         fence: Fence<Pending>,
@@ -1935,15 +2004,17 @@ impl<'device> Device<'device> {
             Err(e) => Err(e),
         }
     }
-    /// Wait for every fence in the array to become signaled, or fail after some timeout.
-    /// If the result is [`FencePoll::Unsignaled`], the result may become immediately out-of-date.
+    /// Wait for every fence in the array to become signaled, or fail after some
+    /// timeout. If the result is [`FencePoll::Unsignaled`], the result may
+    /// become immediately out-of-date.
     pub unsafe fn wait_all_fences_timeout<const N: usize>(
         &self,
         fences: [Fence<Pending>; N],
         timeout: Timeout,
     ) -> Result<FencePoll<[Fence<Signaled>; N], [Fence<Pending>; N]>, SubmitError> {
         if N == 0 {
-            // We can't easily prove to the compiler that [] is valid in this block
+            // We can't easily prove to the compiler that [] is valid in this
+            // block
             return Ok(FencePoll::Signaled(std::array::from_fn(|_| unreachable!())));
         }
         let res = self
@@ -1957,8 +2028,8 @@ impl<'device> Device<'device> {
             Err(e) => Err(SubmitError::from_vk(e)),
         }
     }
-    /// Wait for every fence in the array to become signaled.
-    /// Convinience wrapper around [`Self::wait_all_fences_timeout`] with simpler types.
+    /// Wait for every fence in the array to become signaled. Convinience
+    /// wrapper around [`Self::wait_all_fences_timeout`] with simpler types.
     pub unsafe fn wait_all_fences<const N: usize>(
         &self,
         fences: [Fence<Pending>; N],
@@ -1970,7 +2041,8 @@ impl<'device> Device<'device> {
         }
     }
     /// Wait for any fence in the slice to become signaled, or until a timeout.
-    /// Returns `Ok(true)` if one or more fences were signaled, `Ok(false)` if not.
+    /// Returns `Ok(true)` if one or more fences were signaled, `Ok(false)` if
+    /// not.
     pub unsafe fn wait_any_fence_timeout(
         &self,
         // To my surprise, this is internally synchronized, so no need for &mut.
@@ -1993,12 +2065,12 @@ impl<'device> Device<'device> {
     }
     pub unsafe fn wait_any_fence(&self, fences: &[Fence<Pending>]) -> Result<bool, SubmitError> {
         // For parity with the wait_all* set of functions. Unfortunately,
-        // there's no extra type-information we can communicate here, unlike the other family.
+        // there's no extra type-information we can communicate here, unlike the
+        // other family.
         self.wait_any_fence_timeout(fences, Timeout::Infinite)
     }
-    /// Destroy a fence.
-    /// The bound [`KnownFenceState`] is used to ensure that the fence is not in use within
-    /// a currently-executing submission.
+    /// Destroy a fence. The bound [`KnownFenceState`] is used to ensure that
+    /// the fence is not in use within a currently-executing submission.
     pub unsafe fn destroy_fence<State: KnownFenceState>(&self, fence: Fence<State>) -> &Self {
         self.0.destroy_fence(fence.into_handle(), None);
         self
@@ -2015,16 +2087,17 @@ impl<'device> Device<'device> {
     }
     /// Destroy a [`CommandPool`].
     /// # Safety
-    /// Any [`CommandBuffer`]s allocated from this pool do not need to be [freed](Self::free_command_buffers) prior
-    /// to this call, however they become invalid to access and should be dropped.
+    /// Any [`CommandBuffer`]s allocated from this pool do not need to be
+    /// [freed](Self::free_command_buffers) prior to this call, however they
+    /// become invalid to access and should be dropped.
     pub unsafe fn destroy_command_pool(&self, pool: CommandPool) -> &Self {
         self.0.destroy_command_pool(pool.0, None);
         self
     }
     /// Allocate [`CommandBuffer`]s from the given pool.
     ///
-    /// The constant `N` is the number of command buffers to allocate. Use
-    /// this along with a destructuring to create several buffers at once:
+    /// The constant `N` is the number of command buffers to allocate. Use this
+    /// along with a destructuring to create several buffers at once:
     /// ```no_run
     /// # let device : Device = todo!();
     /// let mut pool = device.create_command_pool(&todo!());
@@ -2089,8 +2162,8 @@ impl<'device> Device<'device> {
         self.0.destroy_buffer(buffer.handle(), None);
         self
     }
-    /// Create an image. The `vkImageUsageFlags`, Dimensionality, Aspect mask, and Multisampled-ness
-    /// are passed at compile time:
+    /// Create an image. The `vkImageUsageFlags`, Dimensionality, Aspect mask,
+    /// and Multisampled-ness are passed at compile time:
     ///
     /// ```no_run
     /// # let device: Device = todo!();
@@ -2117,7 +2190,8 @@ impl<'device> Device<'device> {
     ///     ).unwrap();
     /// ```
     ///
-    /// See: [`ImageAccess`], [`Extent`], [`ColorFormat`], [`DepthStencilFormat`], [`MultiSampled`].
+    /// See: [`ImageAccess`], [`Extent`], [`ColorFormat`],
+    /// [`DepthStencilFormat`], [`MultiSampled`].
     pub unsafe fn create_image<
         Access: ImageAccess,
         Ext: Extent,
@@ -2166,17 +2240,21 @@ impl<'device> Device<'device> {
     }
     /// Create a pipeline cache, optionally populated with some data.
     ///
-    /// If the data is found ny the implementation to be incompatible (but still must be valid as
-    /// defined below) the pipeline cache will be empty.
+    /// If the data is found ny the implementation to be incompatible (but still
+    /// must be valid as defined below) the pipeline cache will be empty.
     /// # Safety
-    /// If `initial_data` is not None or empty, it must be the same data retrieved from a previous
-    /// successful call to [`Self::get_pipeline_cache_data`].
+    /// If `initial_data` is not None or empty, it must be the same data
+    /// retrieved from a previous successful call to
+    /// [`Self::get_pipeline_cache_data`].
     ///
-    /// Fixme: is this correct, or is this always safe? Vk spec is a lil conflicting:
-    /// * `VUID-VkPipelineCacheCreateInfo-initialDataSize-00769`: "If initialDataSize is not 0,
-    ///   pInitialData must have been retrieved from a previous call to vkGetPipelineCacheData"
-    /// * `10.7.4` Note: "[...] providing invalid pipeline cache data as input to any Vulkan API
-    ///   commands will result in the provided pipeline cache data being ignored."
+    /// Fixme: is this correct, or is this always safe? Vk spec is a lil
+    /// conflicting:
+    /// * `VUID-VkPipelineCacheCreateInfo-initialDataSize-00769`: "If
+    ///   initialDataSize is not 0, pInitialData must have been retrieved from a
+    ///   previous call to vkGetPipelineCacheData"
+    /// * `10.7.4` Note: "[...] providing invalid pipeline cache data as input
+    ///   to any Vulkan API commands will result in the provided pipeline cache
+    ///   data being ignored."
     pub unsafe fn create_pipeline_cache(
         &self,
         // Option<> is more idiomatic than empty-or-not
@@ -2192,8 +2270,8 @@ impl<'device> Device<'device> {
     }
     /// Merge several caches into a destination cache.
     ///
-    /// The destination cache will contain its previous contents, plus all the contents of the
-    /// others. The other caches are unchanged.
+    /// The destination cache will contain its previous contents, plus all the
+    /// contents of the others. The other caches are unchanged.
     pub unsafe fn merge_pipeline_caches<'a>(
         &'a self,
         into: &mut PipelineCache,
@@ -2211,9 +2289,10 @@ impl<'device> Device<'device> {
         &self,
         cache: &PipelineCache,
     ) -> Result<Vec<u8>, AllocationError> {
-        // AllocationError here is exhaustive, since VK_INCOMPLETE can't be returned.
-        // (internally, ash does the get length -> get data dance, and the length of data
-        // cannot be changed since we know noone else has mutable access)
+        // AllocationError here is exhaustive, since VK_INCOMPLETE can't be
+        // returned. (internally, ash does the get length -> get data dance, and
+        // the length of data cannot be changed since we know noone else has
+        // mutable access)
         self.0
             .get_pipeline_cache_data(cache.handle())
             .map_err(AllocationError::from_vk)
@@ -2235,20 +2314,23 @@ impl<'device> Device<'device> {
     }
     /// Create (possibly) several compute pipelines.
     ///
-    /// Providing multiple pipeline creations in one invocation is a hint to the implementation that
-    /// the pipelines may be related and to search for shortcuts in compilation, and thus may be more
-    /// efficient than creating several pipelines individually. It is always valid to use bulk
-    /// creations regardless of if the pipelines are actually correlated or not.
+    /// Providing multiple pipeline creations in one invocation is a hint to the
+    /// implementation that the pipelines may be related and to search for
+    /// shortcuts in compilation, and thus may be more efficient than creating
+    /// several pipelines individually. It is always valid to use bulk creations
+    /// regardless of if the pipelines are actually correlated or not.
     ///
     /// # Errors
-    /// If *any* pipeline fails to be created, the others are destroyed and the error is returned.
+    /// If *any* pipeline fails to be created, the others are destroyed and the
+    /// error is returned.
     pub unsafe fn create_compute_pipelines<const N: usize>(
         &self,
         cache: Option<&mut PipelineCache>,
         infos: [ComputePipelineCreateInfo; N],
     ) -> Result<[Pipeline<Compute>; N], AllocationError> {
         if N == 0 {
-            // We can't easily prove to the compiler that [] is valid in this block
+            // We can't easily prove to the compiler that [] is valid in this
+            // block
             return Ok(std::array::from_fn(|_| unreachable!()));
         }
         let infos = infos.each_ref().map(|info| {
@@ -2257,8 +2339,8 @@ impl<'device> Device<'device> {
                 .stage(info.shader.create_info())
         });
         let mut output = std::mem::MaybeUninit::<[vk::Pipeline; N]>::uninit();
-        // We call the raw form (not ash's wrapper) since it works on slices and vecs
-        // while we work on arrays and can thus skip an allocation
+        // We call the raw form (not ash's wrapper) since it works on slices and
+        // vecs while we work on arrays and can thus skip an allocation
         let res = (self.0.fp_v1_0().create_compute_pipelines)(
             self.0.handle(),
             cache
@@ -2271,7 +2353,8 @@ impl<'device> Device<'device> {
         );
         // # Safety
         // Always populates the whole array, failures are populated with NULL.
-        // Complete failure (i.e. no successes) even results in all NULLs. How polite!
+        // Complete failure (i.e. no successes) even results in all NULLs. How
+        // polite!
         let output = output.assume_init();
 
         match res {
@@ -2401,7 +2484,8 @@ impl<'device> Device<'device> {
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         buffer: impl AsRef<Buffer<TransferSrc>>,
-        // FIXME: DepthStencil needs a way to specify *which* of the two aspects.
+        // FIXME: DepthStencil needs a way to specify *which* of the two
+        // aspects.
         image: &'_ Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
         image_layout: vk::ImageLayout,
         regions: [BufferImageCopy<Dim>; N],
@@ -2415,7 +2499,8 @@ impl<'device> Device<'device> {
                 image_offset: region.image_offset.offset(),
                 image_extent: region.image_extent.extent(),
                 buffer_offset: region.buffer_offset,
-                // None for automatic pitch calculation is mapped to a value of 0, convenient!
+                // None for automatic pitch calculation is mapped to a value of
+                // 0, convenient!
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
                 // FIXME: Aspect should be dynamic!
@@ -2434,7 +2519,8 @@ impl<'device> Device<'device> {
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
-        // FIXME: DepthStencil needs a way to specify *which* of the two aspects.
+        // FIXME: DepthStencil needs a way to specify *which* of the two
+        // aspects.
         image: Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
         image_layout: vk::ImageLayout,
         buffer: impl AsRef<Buffer<TransferDst>>,
@@ -2449,7 +2535,8 @@ impl<'device> Device<'device> {
                 image_offset: region.image_offset.offset(),
                 image_extent: region.image_extent.extent(),
                 buffer_offset: region.buffer_offset,
-                // None for automatic pitch calculation is mapped to a value of 0, convenient!
+                // None for automatic pitch calculation is mapped to a value of
+                // 0, convenient!
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
                 // FIXME: Aspect should be dynamic!
@@ -2549,8 +2636,8 @@ impl<'device> Device<'device> {
     ) -> RecordingBuffer<Level, RemainingSubpasses<{ N - 1 }>>
     where
         SubpassCount<N>: HasNextSubpass,
-        // Shouldn't HasNextSubpass already imply this?
-        // I guess there's a reason why generic const arithmetic is unstable :3c
+        // Shouldn't HasNextSubpass already imply this? I guess there's a reason
+        // why generic const arithmetic is unstable :3c
         SubpassCount<{ N - 1 }>: ValidSubpassCount,
     {
         self.0
@@ -2650,8 +2737,8 @@ pub trait CommandBufferState {}
 pub struct OutsideRender;
 /// Typestate for a recording command that is inside a renderpass.
 /// # Typestates
-/// * `REMAINING_PASSES`: how many subpasses left in the renderpass. A renderpass can only
-///   be ended once this reaches the final subpass.
+/// * `REMAINING_PASSES`: how many subpasses left in the renderpass. A
+///   renderpass can only be ended once this reaches the final subpass.
 pub struct RemainingSubpasses<const REMAINING_PASSES: usize>
 where
     SubpassCount<REMAINING_PASSES>: ValidSubpassCount;
@@ -2665,7 +2752,8 @@ pub struct SubpassCount<const N: usize>;
 /// Implemented for all non-zero subpass counts.
 pub trait ValidSubpassCount {}
 impl<const N: usize> ValidSubpassCount for SubpassCount<N> where Pred<{ N > 0 }>: Satisified {}
-/// Implemented for all valid subpass counts where `{Count - 1}` is also a valid subpass count.
+/// Implemented for all valid subpass counts where `{Count - 1}` is also a valid
+/// subpass count.
 pub trait HasNextSubpass: ValidSubpassCount {
     type NextSubpass: ValidSubpassCount;
 }
@@ -2680,10 +2768,12 @@ where
 #[must_use = "dropping the handle will result in a command buffer orphaned in an incomplete state"]
 /// A temporary handle to a command buffer in the `recording` state.
 /// # Typestates
-/// * `Level`: The allocated level of the command buffer being recorded, primary or secondary.
-///   The level of the buffer affects the valid operations that can be recorded into it.
-/// * `State`: The current scope of the command buffer. For example, whether the command buffer
-///   is currently "inside" a render pass, and can thus issue `draw` commands.
+/// * `Level`: The allocated level of the command buffer being recorded, primary
+///   or secondary. The level of the buffer affects the valid operations that
+///   can be recorded into it.
+/// * `State`: The current scope of the command buffer. For example, whether the
+///   command buffer is currently "inside" a render pass, and can thus issue
+///   `draw` commands.
 pub struct RecordingBuffer<'a, Level: CommandBufferLevel, State: CommandBufferState> {
     buffer: vk::CommandBuffer,
     _typed_buffer: PhantomData<&'a mut CommandBuffer<Level>>,

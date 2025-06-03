@@ -1,9 +1,9 @@
-//! An example demonstrating compute pipelines by executing Rong Guodong's Jump Flood Algorithm for
-//! creating voronoi diagrams.
+//! An example demonstrating compute pipelines by executing Rong Guodong's Jump
+//! Flood Algorithm for creating voronoi diagrams.
 use std::num::NonZero;
 
-/// Don't let the compiler see that we're unconditionally panic'ing, as that turns off a bunch of
-/// checks!
+/// Don't let the compiler see that we're unconditionally panic'ing, as that
+/// turns off a bunch of checks!
 fn todo<T>() -> T {
     todo!()
 }
@@ -91,8 +91,8 @@ pub fn main() -> Result<()> {
             .next()
             .ok_or_else(|| anyhow::anyhow!("no suitable device"))?;
 
-        // If we enabled portabilty_enumeration, we *must* enable portability_subset on any device
-        // that advertises it.
+        // If we enabled portabilty_enumeration, we *must* enable
+        // portability_subset on any device that advertises it.
         let extensions = if is_portability {
             &[ash::khr::portability_subset::NAME.as_ptr()][..]
         } else {
@@ -128,11 +128,18 @@ pub fn main() -> Result<()> {
 
     unsafe {
         // =========================================================================================
-        // Create buffer + images objects and appropriate backing memory. We will need: One host
-        // buffer, one R8Unorm format image to reference, two RG16Uint format images to "pingpong"
-        // between. Our operation will look like:
+        // Create buffer + images objects and appropriate backing memory. We
+        // will need: One host buffer, one R8Unorm format image to reference,
+        // two RG16Uint format images to "pingpong" between. Our operation will
+        // look like:
 
-        // Host buffer --xfer--> color --storage--> UV1 <--storage--> UV2 --xfer--> host buffer.
+        // Host buffer --xfer--> color
+
+        // color --storage--> UV1
+
+        // UV1 --storage--> UV2 --storage--> UV1 --> [...]
+
+        // UV1 or UV2 --xfer--> host buffer.
 
         let buffer = device.create_buffer(
             // Source for original image, dst for output image
@@ -153,8 +160,8 @@ pub fn main() -> Result<()> {
         let pingpong_array = device.create_image(
             // Source for exporting the final image, storage for shader access.
             (TransferSrc, Storage),
-            // Two layers to "pingpong" between. For each of the iterations, we will swap each
-            // between source and destination.
+            // Two layers to "pingpong" between. For each of the iterations, we
+            // will swap each between source and destination.
             extent.with_layers(ArrayCount::TWO),
             MipCount::ONE,
             // Enough space to store a non-normalized UV coordinate.
@@ -178,8 +185,9 @@ pub fn main() -> Result<()> {
             & pingpong_array_requirements.memory_type_bits;
 
         // =========================================================================================
-        // Create the compute pipeline that will do the work Shader that takes our reference image,
-        // and performs the initial population of our pingpong image.
+        // Create the compute pipeline that will do the work Shader that takes
+        // our reference image, and performs the initial population of our
+        // pingpong image.
         let import_module = device.create_module(&[todo()])?;
         let import_shader = import_module.main(Compute).specialize(&());
         // Shader that iteratively refines between the two pingpong images.
