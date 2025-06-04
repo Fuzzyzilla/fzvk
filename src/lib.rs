@@ -60,6 +60,11 @@
 //!   when unambiguously implied at compile time.
 //!   * *Handles do not implement Drop*
 //!
+//! ## Feature Flags
+//! * `alloc` (default) - Some helper functions for reading dynamically-sized
+//!   data from the implementation. Otherwise, the user will need to do the
+//!   get-length-get-data dance manually.
+//!
 //! ## Errors
 //! All vulkan runtime errors (Device lost, out-of-memory, etc.), with the
 //! exception of "expected" errors like `ERROR_TIMEOUT` or s`ERROR_NOT_READY`,
@@ -146,8 +151,15 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(generic_const_exprs)]
 #![allow(clippy::missing_safety_doc)]
-use ash::vk::{self, Handle};
-use std::{marker::PhantomData, num::NonZero};
+// "fake variadics"
+#![cfg_attr(doc, feature(rustdoc_internals))]
+#![no_std]
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+pub use ash::{self, vk};
+use core::{marker::PhantomData, num::NonZero};
+use vk::Handle;
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -159,7 +171,7 @@ impl<'a> SharingFamilies<'a> {
     /// # Safety
     /// * The slice must be length 2 or more.
     /// * Every element of the slice must be unique.
-    pub const unsafe fn new_unchecked(families: &'a [u32]) -> Self {
+    pub const unsafe fn from_slice_unchecked(families: &'a [u32]) -> Self {
         debug_assert!(families.len() >= 2);
         #[cfg(debug_assertions)]
         {
@@ -181,11 +193,9 @@ impl<'a> SharingFamilies<'a> {
     }
     /// Create from an array.
     /// # Panics
-    /// If not every element is unique.
-    pub const fn new_array<const N: usize>(families: &'a [u32; N]) -> Self
-    where
-        Pred<{ N >= 2 }>: Satisified,
-    {
+    /// * Length is < 2.
+    /// * If not every element is unique.
+    pub const fn from_array<const N: usize>(families: &'a [u32; N]) -> Self {
         assert!(families.len() >= 2);
         // const fns are nightmarish :3
         let mut i = 0;
@@ -278,9 +288,9 @@ pub enum AllocationError {
     /// The implementation could not allocate enough device memory.
     OutOfDeviceMemory = vk::Result::ERROR_OUT_OF_DEVICE_MEMORY.as_raw(),
 }
-impl std::error::Error for AllocationError {}
-impl std::fmt::Display for AllocationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::error::Error for AllocationError {}
+impl core::fmt::Display for AllocationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::OutOfHostMemory => write!(f, "out of host memory"),
             Self::OutOfDeviceMemory => write!(f, "out of device memory"),
@@ -305,7 +315,7 @@ impl AllocationError {
 ///
 /// For enumerating a number of Type-State parameters.
 ///
-/// ```
+/// ```ignore
 /// typestate_enum!(pub enum trait Soup { pub struct Stew, pub struct Chili, pub struct Oatmeal });
 /// ```
 macro_rules! typestate_enum {
@@ -323,7 +333,7 @@ macro_rules! typestate_enum {
 /// several type-state bounds placed in a [`PhantomData`], and implements
 /// [`ThinHandle`] on it.
 ///
-/// ```
+/// ```ignore
 /// thin_handle!(pub struct SoupHandle<Kind: Soup>(u8));
 /// ```
 macro_rules! thin_handle {
@@ -352,10 +362,10 @@ macro_rules! thin_handle {
 /// # Safety
 /// `Self` must be `repr(transparent)` over `Self::Handle`
 pub unsafe trait ThinHandle: Sized {
-    type Handle: Copy;
+    type Handle: Copy + Handle;
     // Doesn't work? Always succeeds even when it shouldn't. Weird. const SOUP:
-    // () = assert!(std::mem::size_of::<Self>() ==
-    // std::mem::size_of::<Self::Handle>(),);
+    // () = assert!(core::mem::size_of::<Self>() ==
+    // core::mem::size_of::<Self::Handle>(),);
 
     /// Get a copy of the underlying handle.
     /// # Safety
@@ -363,10 +373,10 @@ pub unsafe trait ThinHandle: Sized {
     /// state no longer matches the existing value of `Self`.
     unsafe fn handle(&self) -> Self::Handle {
         debug_assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<Self::Handle>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<Self::Handle>()
         );
-        unsafe { std::mem::transmute_copy(self) }
+        unsafe { core::mem::transmute_copy(self) }
     }
     /// Discard the typestate and access the underlying handle.
     ///
@@ -383,10 +393,10 @@ pub unsafe trait ThinHandle: Sized {
     /// state no longer matches the existing value of `Self`
     unsafe fn handles_of(values: &[Self]) -> &[Self::Handle] {
         debug_assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<Self::Handle>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<Self::Handle>()
         );
-        unsafe { std::mem::transmute::<&[Self], &[Self::Handle]>(values) }
+        unsafe { core::mem::transmute::<&[Self], &[Self::Handle]>(values) }
     }
     /// Create an object from the relavant handle.
     /// # Safety
@@ -395,8 +405,8 @@ pub unsafe trait ThinHandle: Sized {
     unsafe fn from_handle(handle: Self::Handle) -> Self {
         // Manual transmute since the sizes aren't known.
         debug_assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<Self::Handle>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<Self::Handle>()
         );
         unsafe { (&raw const handle).cast::<Self>().read() }
     }
@@ -407,6 +417,7 @@ pub unsafe trait ThinHandle: Sized {
     /// Usage: ([`Buffer`] implements it's own functions for this, such as
     /// [`Buffer::as_subaccess`] just as an example:)
     /// ```no_run
+    /// # use fzvk::*;
     /// let buffer : Buffer<Storage> = todo!();
     /// let vertex_buffer = unsafe { buffer.with_state::<Buffer<Vertex>>() };
     /// ```
@@ -422,10 +433,10 @@ pub unsafe trait ThinHandle: Sized {
     /// consistent with the typestate of `Other`
     unsafe fn with_state_mut<Other: ThinHandle<Handle = Self::Handle>>(&mut self) -> &mut Other {
         debug_assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<Self::Handle>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<Self::Handle>()
         );
-        std::mem::transmute(self)
+        core::mem::transmute(self)
     }
     /// Change the typestate of the thin handle. This is a jackhammer to drive a
     /// nail, so implementors may provide a safe subset of this operation or
@@ -433,10 +444,10 @@ pub unsafe trait ThinHandle: Sized {
     /// consistent with the typestate of `Other`
     unsafe fn with_state_ref<Other: ThinHandle<Handle = Self::Handle>>(&self) -> &Other {
         debug_assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<Self::Handle>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<Self::Handle>()
         );
-        std::mem::transmute(self)
+        core::mem::transmute(self)
     }
 }
 macro_rules! access_combinations {
@@ -445,9 +456,13 @@ macro_rules! access_combinations {
     }} => {
         // Trailing comma to force it to be a tuple type, even for single
         // fields.
-        $(impl<$($name : $trait_name),+> $trait_name for ($($name),*,) {
-            const $const_name: $const_ty = <$const_ty>::from_raw($(<$name as $trait_name>::$const_name.as_raw())|*);
-        })+
+        $(
+            // Hide, as we use a fake variadic when generating docs.
+            #[doc(hidden)]
+            impl<$($name : $trait_name),+> $trait_name for ($($name),*,) {
+                const $const_name: $const_ty = <$const_ty>::from_raw($(<$name as $trait_name>::$const_name.as_raw())|*);
+            }
+        )+
     };
 }
 
@@ -495,9 +510,14 @@ pub struct Uniform;
 impl BufferAccess for Uniform {
     const FLAGS: vk::BufferUsageFlags = vk::BufferUsageFlags::UNIFORM_BUFFER;
 }
+#[cfg_attr(doc, doc(fake_variadic))]
+/// Implemented for tuples of the form of, for example, `(Storage, TransferDst,
+/// TransferSrc)`. The resulting usage flags is the union of all members.
+impl<A: BufferAccess> BufferAccess for (A,) {
+    const FLAGS: vk::BufferUsageFlags = A::FLAGS;
+}
 access_combinations! {
     impl BufferAccess for [
-        (A,),
         (A,B),
         (A,B,C),
         (A,B,C,D),
@@ -553,9 +573,14 @@ pub struct InputAttachment;
 impl ImageAccess for InputAttachment {
     const FLAGS: vk::ImageUsageFlags = vk::ImageUsageFlags::INPUT_ATTACHMENT;
 }
+/// Implemented for tuples of the form of, for example, `(Storage, TransferDst,
+/// TransferSrc)`. The resulting usage flags is the union of all members.
+#[cfg_attr(doc, doc(fake_variadic))]
+impl<A: ImageAccess> ImageAccess for (A,) {
+    const FLAGS: vk::ImageUsageFlags = A::FLAGS;
+}
 access_combinations! {
     impl ImageAccess for [
-        (A,),
         (A,B),
         (A,B,C),
         (A,B,C,D),
@@ -985,20 +1010,20 @@ impl SubresourceMipArray {
     /// If a range is specified without an end, e.g. `0..`,
     /// `VK_REMAINING_LAYERS` is specified. # Panics If layers is an inverted or
     /// empty range.
-    pub fn new(mip: u32, layers: impl std::ops::RangeBounds<u32>) -> Self {
+    pub fn new(mip: u32, layers: impl core::ops::RangeBounds<u32>) -> Self {
         let start_layer = match layers.start_bound() {
-            std::ops::Bound::Excluded(&a) => a.checked_add(1).unwrap(),
-            std::ops::Bound::Included(&a) => a,
-            std::ops::Bound::Unbounded => 0,
+            core::ops::Bound::Excluded(&a) => a.checked_add(1).unwrap(),
+            core::ops::Bound::Included(&a) => a,
+            core::ops::Bound::Unbounded => 0,
         };
         let layer_count = match layers.end_bound() {
-            std::ops::Bound::Excluded(&end) => {
+            core::ops::Bound::Excluded(&end) => {
                 assert!(start_layer < end);
                 // Safety - just checked that end is strictly larger, therefore
                 // a difference >= 1.
                 unsafe { NonZero::new_unchecked(end - start_layer) }
             }
-            std::ops::Bound::Included(&end) => {
+            core::ops::Bound::Included(&end) => {
                 assert!(start_layer <= end);
                 let count = (end - start_layer)
                     .checked_add(1)
@@ -1006,7 +1031,7 @@ impl SubresourceMipArray {
                 // Unconditional +1, always nonzero.
                 unsafe { NonZero::new_unchecked(count) }
             }
-            std::ops::Bound::Unbounded => NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap(),
+            core::ops::Bound::Unbounded => NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap(),
         };
         Self {
             mip,
@@ -1029,8 +1054,8 @@ impl SubresourceLayers for SubresourceMipArray {
 pub trait ResourceRange {
     fn subresource_range(&self) -> vk::ImageSubresourceRange;
 }
-pub struct SubresourceRange(pub std::ops::Range<u32>);
-pub struct LayeredSubresourceRange{pub mips: std::ops::Range<u32>, pub layers: std::ops::Range<u32>}*/
+pub struct SubresourceRange(pub core::ops::Range<u32>);
+pub struct LayeredSubresourceRange{pub mips: core::ops::Range<u32>, pub layers: core::ops::Range<u32>}*/
 
 /// A value representing an image's pixel format.
 pub trait ImageFormat {
@@ -1417,7 +1442,7 @@ impl ShaderModule {
     /// * The device must be capable of using a shader of type `Stage`
     pub unsafe fn entry<'a, Stage: ShaderStage>(
         &'a self,
-        name: &'a std::ffi::CStr,
+        name: &'a core::ffi::CStr,
         _stage: Stage,
     ) -> Entry<'a, Stage> {
         Entry {
@@ -1446,16 +1471,20 @@ impl ShaderModule {
 #[derive(Copy, Clone)]
 pub struct Entry<'a, Stage: ShaderStage> {
     module: vk::ShaderModule,
-    entry: &'a std::ffi::CStr,
+    entry: &'a core::ffi::CStr,
     _marker: PhantomData<(&'a ShaderModule, Stage)>,
 }
 impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
     /// Provide constants to the shader compiler.
     ///
     /// If your shader does not use specialization, you can specialize on the
-    /// unit type: ```no_run
+    /// unit type:
+    /// ```no_run
+    /// # use fzvk::*;
     /// # let module : ShaderModule = todo!();
-    /// let specialized_entry = module.main().specialize(());
+    /// # unsafe {
+    /// let specialized_entry = module.main(Compute).specialize(&());
+    /// # }
     /// ```
     /// # Safety
     /// * Every constant necessary for a complete module entry point must be
@@ -1470,7 +1499,7 @@ impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
             module: self.module,
             entry: self.entry,
             specialization_info: vk::SpecializationInfo {
-                data_size: std::mem::size_of::<S>(),
+                data_size: core::mem::size_of::<S>(),
                 p_data: (specialization as *const S).cast(),
                 ..vk::SpecializationInfo::default().map_entries(S::ENTRIES)
             },
@@ -1488,7 +1517,7 @@ impl<'a, Stage: ShaderStage> Entry<'a, Stage> {
 /// * `Stage`: The type of the shader, e.g. [`Vertex`], [`Compute`]
 pub struct SpecializedEntry<'a, Stage: ShaderStage> {
     module: vk::ShaderModule,
-    entry: &'a std::ffi::CStr,
+    entry: &'a core::ffi::CStr,
     // &dyn but funny
     specialization_info: vk::SpecializationInfo<'a>,
     // specialization_map: &'a [vk::SpecializationMapEntry],
@@ -1669,9 +1698,9 @@ pub enum SubmitError {
     /// The device context is irreparably destroyed. Oops!
     DeviceLost = vk::Result::ERROR_DEVICE_LOST.as_raw(),
 }
-impl std::error::Error for SubmitError {}
-impl std::fmt::Display for SubmitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::error::Error for SubmitError {}
+impl core::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::OutOfHostMemory => write!(f, "out of host memory"),
             Self::OutOfDeviceMemory => write!(f, "out of device memory"),
@@ -1815,6 +1844,18 @@ pub struct SubmitWithFence<const WAITS: usize, const SIGNALS: usize> {
     pub signal_fence: Fence<Pending>,
 }
 
+/// An error that can occur while reading a pipeline cache. Contains the
+/// sub-slice that the data takes up.
+///
+/// `Incomplete` is *not* a fatal error, just that the implementation had more
+/// data than the array had room for.
+pub enum TryGetPipelineCache<'a> {
+    /// Fetched the whole data.
+    Ok(&'a mut [u8]),
+    /// Fetched as much data as we could, but there was too much.
+    Incomplete(&'a mut [u8]),
+}
+
 impl<'device> Device<'device> {
     /// Bundle a handle with a device pointer, allowing the handle to have it's
     /// own associated functions and making method chaining possible even
@@ -1827,18 +1868,24 @@ impl<'device> Device<'device> {
     /// This is a zero-cost operation.
     ///
     /// ```no_run
+    /// # use fzvk::*;
     /// # let device: Device = todo!();
     /// let pending_fence: Fence<Pending> = todo!();
-    /// let completed_fence = device.wait(pending_fence).unwrap();
+    /// # unsafe {
+    /// let completed_fence = device.wait_fence(pending_fence).unwrap();
     /// device.destroy_fence(completed_fence);
+    /// # }
     /// ```
     /// becomes
     /// ```no_run
+    /// # use fzvk::*;
     /// # let device: Device = todo!();
     /// let pending_fence: Fence<Pending> = todo!();
+    /// # unsafe {
     /// device.bind(pending_fence)
     ///     .wait().unwrap()
     ///     .destroy();
+    /// # }
     /// ```
     ///
     /// # Safety
@@ -1932,8 +1979,11 @@ impl<'device> Device<'device> {
     }
     /// Create a fence in the given state, [`Signaled`] or [`Unsignaled`].
     /// ```no_run
+    /// # use fzvk::*;
     /// # let device : Device = todo!();
+    /// # unsafe {
     /// let signaled = device.create_fence::<Unsignaled>().unwrap();
+    /// # }
     /// ```
     pub unsafe fn create_fence<State: KnownFenceState>(
         &self,
@@ -2015,7 +2065,9 @@ impl<'device> Device<'device> {
         if N == 0 {
             // We can't easily prove to the compiler that [] is valid in this
             // block
-            return Ok(FencePoll::Signaled(std::array::from_fn(|_| unreachable!())));
+            return Ok(FencePoll::Signaled(core::array::from_fn(
+                |_| unreachable!(),
+            )));
         }
         let res = self
             .0
@@ -2099,9 +2151,12 @@ impl<'device> Device<'device> {
     /// The constant `N` is the number of command buffers to allocate. Use this
     /// along with a destructuring to create several buffers at once:
     /// ```no_run
+    /// # use fzvk::*;
     /// # let device : Device = todo!();
-    /// let mut pool = device.create_command_pool(&todo!());
+    /// # let mut pool : CommandPool = todo!();
+    /// # unsafe {
     /// let [buffer_a, buffer_b] = device.allocate_command_buffers(&mut pool, Primary).unwrap();
+    /// # }
     /// ```
     pub unsafe fn allocate_command_buffers<const N: usize, Level: CommandBufferLevel>(
         &self,
@@ -2133,12 +2188,16 @@ impl<'device> Device<'device> {
     /// Create a buffer. The `BufferUsageFlags` are passed at compile time:
     ///
     /// ```no_run
+    /// # use fzvk::*;
+    /// # use std::num::NonZero;
     /// # let device: Device = todo!();
+    /// # unsafe {
     /// let buffer = device.create_buffer(
     ///         (Storage, TransferSrc, TransferDst),
-    ///         1024,
+    ///         NonZero::new(1024).unwrap(),
     ///         SharingMode::Concurrent(SharingFamilies::from_array(&[0, 1])),
     ///     );
+    /// # }
     /// ```
     pub unsafe fn create_buffer<Access: BufferAccess>(
         &self,
@@ -2166,7 +2225,10 @@ impl<'device> Device<'device> {
     /// and Multisampled-ness are passed at compile time:
     ///
     /// ```no_run
+    /// # use fzvk::*;
+    /// # use core::num::NonZero;
     /// # let device: Device = todo!();
+    /// # unsafe {
     /// let image = device.create_image(
     ///         // The usages the image will be created with.
     ///         // This becomes part of the image's type.
@@ -2185,9 +2247,10 @@ impl<'device> Device<'device> {
     ///         // Makes a non-multisampled image.
     ///         // You can also use the MultiSampled enum.
     ///         SingleSampled,
-    ///         vk::ImageTiling::Optimal,
+    ///         vk::ImageTiling::OPTIMAL,
     ///         SharingMode::Exclusive
     ///     ).unwrap();
+    /// # }
     /// ```
     ///
     /// See: [`ImageAccess`], [`Extent`], [`ColorFormat`],
@@ -2285,10 +2348,12 @@ impl<'device> Device<'device> {
             .map_err(AllocationError::from_vk)?;
         Ok(self)
     }
+    /// Shorthand for fetching the pipeline's size, then fetching its data.
+    #[cfg(feature = "alloc")]
     pub unsafe fn get_pipeline_cache_data(
         &self,
         cache: &PipelineCache,
-    ) -> Result<Vec<u8>, AllocationError> {
+    ) -> Result<alloc::vec::Vec<u8>, AllocationError> {
         // AllocationError here is exhaustive, since VK_INCOMPLETE can't be
         // returned. (internally, ash does the get length -> get data dance, and
         // the length of data cannot be changed since we know noone else has
@@ -2296,6 +2361,76 @@ impl<'device> Device<'device> {
         self.0
             .get_pipeline_cache_data(cache.handle())
             .map_err(AllocationError::from_vk)
+    }
+    /// Get the number of bytes in the pipeline cache. If the pipeline cache is
+    /// mutably used, e.g. in a merge or pipeline create call, the value may
+    /// become out-of-date.
+    pub unsafe fn get_pipeline_cache_data_size(
+        &self,
+        cache: &PipelineCache,
+    ) -> Result<usize, AllocationError> {
+        let mut size = core::mem::MaybeUninit::<usize>::uninit();
+        let res = unsafe {
+            (self.0.fp_v1_0().get_pipeline_cache_data)(
+                self.0.handle(),
+                cache.handle(),
+                size.as_mut_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        match res {
+            vk::Result::SUCCESS | vk::Result::INCOMPLETE => Ok(unsafe { size.assume_init() }),
+            e => Err(AllocationError::from_vk(e)),
+        }
+    }
+    /// Get some data from the pipeline.
+    ///
+    /// The freshly populated subslice of data is returned, with an indication
+    /// of whether the buffer was sufficient to fetch *all* of the data, or
+    /// whether only some subset of it was successfully fetched.
+    pub unsafe fn try_get_pipeline_cache_data<'a>(
+        &'_ self,
+        cache: &PipelineCache,
+        data: &'a mut [core::mem::MaybeUninit<u8>],
+    ) -> Result<TryGetPipelineCache<'a>, AllocationError> {
+        let mut len = data.len();
+        let res = unsafe {
+            (self.0.fp_v1_0().get_pipeline_cache_data)(
+                self.0.handle(),
+                cache.handle(),
+                // In-out param, our max len in, and the len actually written
+                // out.
+                &raw mut len,
+                // Subtlety: Data ptr is *non null*, even if empty, so this
+                // *will not* trigger the "get total len" functionality. It will
+                // correctly be treated as a get of length zero, and will fail
+                // gracefully (or succeed if actually empty?). Otherwise, we'd
+                // have a big issue of zero-len slice being treated as an
+                // as-big-as-the-implementation-wants slice. Woe!
+                data.as_mut_ptr().cast(),
+            )
+        };
+        match res {
+            vk::Result::SUCCESS | vk::Result::INCOMPLETE => {
+                assert!(len <= data.len());
+                let populated = &mut data[..len];
+
+                // Safety - the API reports how many bytes it wrote, so we can
+                // assume 0..len has been written and is now init.
+                let assume_init = unsafe {
+                    core::mem::transmute::<&'a mut [core::mem::MaybeUninit<u8>], &'a mut [u8]>(
+                        populated,
+                    )
+                };
+
+                if res == vk::Result::SUCCESS {
+                    Ok(TryGetPipelineCache::Ok(assume_init))
+                } else {
+                    Ok(TryGetPipelineCache::Incomplete(assume_init))
+                }
+            }
+            e => Err(AllocationError::from_vk(e)),
+        }
     }
     pub unsafe fn destroy_pipeline_cache(&self, cache: PipelineCache) -> &Self {
         self.0.destroy_pipeline_cache(cache.into_handle(), None);
@@ -2331,14 +2466,14 @@ impl<'device> Device<'device> {
         if N == 0 {
             // We can't easily prove to the compiler that [] is valid in this
             // block
-            return Ok(std::array::from_fn(|_| unreachable!()));
+            return Ok(core::array::from_fn(|_| unreachable!()));
         }
         let infos = infos.each_ref().map(|info| {
             vk::ComputePipelineCreateInfo::default()
                 .layout(info.layout)
                 .stage(info.shader.create_info())
         });
-        let mut output = std::mem::MaybeUninit::<[vk::Pipeline; N]>::uninit();
+        let mut output = core::mem::MaybeUninit::<[vk::Pipeline; N]>::uninit();
         // We call the raw form (not ash's wrapper) since it works on slices and
         // vecs while we work on arrays and can thus skip an allocation
         let res = (self.0.fp_v1_0().create_compute_pipelines)(
@@ -2348,7 +2483,7 @@ impl<'device> Device<'device> {
                 .unwrap_or(vk::PipelineCache::null()),
             N.try_into().unwrap(),
             infos.as_ptr(),
-            std::ptr::null(),
+            core::ptr::null(),
             output.as_mut_ptr().cast(),
         );
         // # Safety
@@ -2595,8 +2730,8 @@ impl<'device> Device<'device> {
     pub unsafe fn draw<const N: usize, Level: CommandBufferLevel>(
         &self,
         buffer: &mut RecordingBuffer<Level, RemainingSubpasses<N>>,
-        vertices: std::ops::Range<u32>,
-        instances: std::ops::Range<u32>,
+        vertices: core::ops::Range<u32>,
+        instances: core::ops::Range<u32>,
     ) -> &Self
     where
         SubpassCount<N>: ValidSubpassCount,
@@ -2614,8 +2749,8 @@ impl<'device> Device<'device> {
         &self,
         buffer: &mut RecordingBuffer<Level, RemainingSubpasses<N>>,
         vertex_offset: i32,
-        indices: std::ops::Range<u32>,
-        instances: std::ops::Range<u32>,
+        indices: core::ops::Range<u32>,
+        instances: core::ops::Range<u32>,
     ) -> &Self
     where
         SubpassCount<N>: ValidSubpassCount,
