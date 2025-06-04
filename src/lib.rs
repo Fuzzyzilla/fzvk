@@ -1314,7 +1314,10 @@ typestate_enum! {
         pub struct Timeline,
     }
 }
+/// Typestate for a semaphore which the device is currently waiting on.
+pub struct Waiting;
 impl SemaphoreState for Pending {}
+impl SemaphoreState for Waiting {}
 impl SemaphoreState for Unsignaled {}
 
 thin_handle! {
@@ -1322,13 +1325,93 @@ thin_handle! {
     /// coarse-grained inter-queue dependencies.
     /// # Typestate
     /// * [`State`](SemaphoreState): Describes whether a signal operation on
-    ///   this sempahore is pending, and thus whether it can be waited on.
-    ///   * The "Signaled" state that fences have is missing, as the act of
-    ///     observing a semaphore in the Signaled state immediately sets it to
-    ///     the unsignaled state, thus transitioning directly from
-    ///     Pending->Unsignaled.
+    ///   this sempahore is pending, and thus whether it can be waited on. It
+    ///   always follows the flow `Unsignaled -> Pending -> Waiting ->
+    ///   Unsignaled`.
+    ///   * The [`Signaled`] state that [fences](Fence) have is missing, as the
+    ///     act of observing a semaphore in the Signaled state immediately sets
+    ///     it to the unsignaled state, thus transitioning directly from
+    ///     `Waiting -> Unsignaled`.
+    ///   * The [`Waiting`] typestate cannot be transitioned away from
+    ///     automatically by the library. In order for a waiting sempahore to
+    ///     once again become an Unsignaled semaphore, a fence representing the
+    ///     operation on the semaphore must be detected by the host to have been
+    ///     signaled, which cannot be proven on a typestate level. See
+    ///     [`Semaphore::assume_waited`].
     #[must_use = "dropping the handle will not destroy the semaphore and may leak resources"]
     pub struct Semaphore<State: SemaphoreState>(vk::Semaphore);
+}
+impl Semaphore<Pending> {
+    /// Construct a wait operation. When passed into a queue submission
+    /// operation, the device will wait for this semaphore to be signaled before
+    /// any of the stages set in `wait_stage` can begin executing.
+    pub fn into_wait(self, wait_stage: vk::PipelineStageFlags) -> WaitSemaphore {
+        WaitSemaphore {
+            semaphore: self,
+            wait_stage,
+        }
+    }
+}
+impl Semaphore<Waiting> {
+    /// Assume that the host has observed a completed GPU-side wait operation.
+    /// For example, once the fence of [`Device::submit_with_fence`] has been
+    /// observed to be [`Signaled`], all [wait semaphores](WaitSemaphore) on
+    /// that operation can soundly be assumed to be successfully waited.
+    ///
+    /// This transitions directly to [`Unsignaled`] instead of having a
+    /// [`Signaled`] state, as the device observing a semaphore in the Signaled
+    /// state instantly transitions it to the [`Unsignaled`] state.
+    ///
+    /// A common pattern is thus:
+    /// ```no_run
+    /// # use fzvk::*;
+    /// # let device: Device = todo!();
+    /// # let mut queue: Queue = todo!();
+    /// let command_buffer: CommandBuffer<Primary> = todo!();
+    /// let fence: Fence<Unsignaled> = todo!();
+    /// // The result of some previous device-side operation that will signal
+    /// // this semaphore on completion.
+    /// let signaling_semaphore : Semaphore<Pending> = todo!();
+    ///
+    /// # unsafe {
+    /// // Submit some new work, that waits on that semaphore.
+    /// let submission = device.submit_with_fence(
+    ///         &mut queue,
+    ///         [
+    ///             signaling_semaphore
+    ///                 .into_wait(vk::PipelineStageFlags::TOP_OF_PIPE)
+    ///         ],
+    ///         &[command_buffer.reference()],
+    ///         [],
+    ///         fence
+    ///     )
+    ///     .unwrap();
+    /// // Destructure the outputs of the operation
+    /// let SubmitWithFence {
+    ///     waited_semaphores: [waiting_semaphore],
+    ///     pending_fence: fence,
+    ///     signaled_semaphores: []
+    /// } = submission;
+    /// // Wait for the work to complete on the device.
+    /// let fence = device.wait_fence(fence).unwrap();
+    /// // Since we observed the fence to now be signaled, we know that the
+    /// // `wait_semaphores` have each been successfully waited on by the
+    /// // device!
+    /// let unsignaled_semaphore = waiting_semaphore.assume_waited();
+    /// # }
+    /// ```
+    /// # Safety
+    /// * The semaphore must have been indirectly observed to have been
+    ///   successfully waited upon through external means.
+    pub unsafe fn assume_waited(self) -> Semaphore<Unsignaled> {
+        self.with_state()
+    }
+    /// Convinience wrapper around [`Self::assume_waited`] for many semaphores.
+    pub unsafe fn assume_many_waited<const N: usize>(
+        many: [Self; N],
+    ) -> [Semaphore<Unsignaled>; N] {
+        many.map(|waited| waited.with_state())
+    }
 }
 
 thin_handle! {
@@ -1830,18 +1913,18 @@ thin_handle!(
     /// * [`Access`](MemoryAccess): Whether the memory is host-visible.
     pub struct Memory<Access: MemoryAccess>(vk::DeviceMemory);
 );
-
+#[must_use = "the semaphore contained will be leaked"]
 pub struct WaitSemaphore {
     pub semaphore: Semaphore<Pending>,
     /// These stages must wait before beginning execution.
     pub wait_stage: vk::PipelineStageFlags,
 }
 
+#[must_use = "the handles contained will be leaked"]
 pub struct SubmitWithFence<const WAITS: usize, const SIGNALS: usize> {
-    /// FIXME: They will *eventually* be unsignaled, not immediately.
-    pub waited_sempahores: [Semaphore<Unsignaled>; WAITS],
+    pub waited_semaphores: [Semaphore<Waiting>; WAITS],
     pub signaled_semaphores: [Semaphore<Pending>; SIGNALS],
-    pub signal_fence: Fence<Pending>,
+    pub pending_fence: Fence<Pending>,
 }
 
 /// An error that can occur while reading a pipeline cache. Contains the
@@ -1933,9 +2016,9 @@ impl<'device> Device<'device> {
             )
             .map_err(SubmitError::from_vk)?;
         Ok(SubmitWithFence {
-            waited_sempahores: wait_semaphores.map(|wait| wait.semaphore.with_state()),
+            waited_semaphores: wait_semaphores.map(|wait| wait.semaphore.with_state()),
             signaled_semaphores: signal_semaphores.map(|signal| signal.with_state()),
-            signal_fence: signal_fence.with_state(),
+            pending_fence: signal_fence.with_state(),
         })
     }
     /// Wait for a queue to complete all prior submissions, *as if* a fence on
@@ -2853,7 +2936,7 @@ unsafe fn waawa() {
 
     let fence = device.create_fence::<Unsignaled>().unwrap().into_inner();
     let SubmitWithFence {
-        signal_fence: fence,
+        pending_fence: fence,
         ..
     } = device
         .submit_with_fence(&mut queue, [], &[cb1.reference()], [], fence)
