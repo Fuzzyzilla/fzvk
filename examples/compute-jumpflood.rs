@@ -14,9 +14,12 @@ use fzvk::*;
 pub fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: <in-png-path>"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: <in-path.png>"))?;
     let image =
         png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?)).read_info()?;
+    if image.info().width > u32::from(u16::MAX) || image.info().height > u32::from(u16::MAX) {
+        anyhow::bail!("image dimensions too large.")
+    }
     // =========================================================================================
     // Create an instance.
     let entry = ash::Entry::linked();
@@ -115,6 +118,7 @@ pub fn main() -> Result<()> {
     };
 
     let device = Device::from_ash(&ash_device);
+    let mut queue = unsafe { Queue::from_handle(queue) };
     // =========================================================================================
     // Import image, and take only its Alpha channel.
     let extent = Extent2D {
@@ -194,12 +198,20 @@ pub fn main() -> Result<()> {
         let pingpong_module = device.create_module(&[todo()])?;
         let pingpong_shader = pingpong_module.main(Compute).specialize(&());
 
-        let [pipeline] = device.create_compute_pipelines(
+        let empty_layout = device.create_pipeline_layout::<()>()?;
+
+        let [import_pipe, pingpong_pipe] = device.create_compute_pipelines(
             None,
-            [ComputePipelineCreateInfo {
-                layout: todo(),
-                shader: pingpong_shader,
-            }],
+            [
+                ComputePipelineCreateInfo {
+                    layout: &empty_layout.handle(),
+                    shader: import_shader,
+                },
+                ComputePipelineCreateInfo {
+                    layout: &empty_layout.handle(),
+                    shader: pingpong_shader,
+                },
+            ],
         )?;
 
         // It's fine to destroy a shader while it's in use by a pipeline
@@ -211,14 +223,162 @@ pub fn main() -> Result<()> {
                 .queue_family_index(queue_family_index)
                 .flags(vk::CommandPoolCreateFlags::TRANSIENT),
         )?;
-        let [command_buffer] = device.allocate_command_buffers(&mut command_pool, Primary)?;
+
+        // =========================================================================================
+        // Record a command buffer describing the whole operation
+        let [mut command_buffer] = device.allocate_command_buffers(&mut command_pool, Primary)?;
+        let mut recording = device.begin_command_buffer(&mut command_pool, &mut command_buffer)?;
+
+        // Barrier building blocks that we'll be using a lot! Specifies a wait
+        // until all previous compute shaders have finished and flushes their
+        // writes to any storage.
+        let wait_compute_write =
+            sync::StageAccess::shader_access::<Compute>(sync::WriteAccess::SHADER_WRITE);
+        // Specifies a block on all future compute shaders and invalidates their
+        // storage caches for reads and writes.
+        let block_compute_read_write =
+            sync::StageAccess::shader_access::<Compute>(sync::ReadWriteAccess::SHADER_READ_WRITE);
+
+        // Import the image from the host buffer
+        device
+            // Transition the images from Undefined -> The formats we need.
+            .barrier(
+                &mut recording,
+                // We aren't waiting on any previous operations.
+                sync::MemoryCondition::None,
+                // Block transfer from occuring until the image is in the right
+                // layout to accept it.
+                sync::StageAccess::from_stage_access(
+                    sync::PipelineStages::TRANSFER,
+                    sync::ReadWriteAccess::TRANSFER_WRITE,
+                )
+                .into(),
+                // TODO: transition images.
+                // reference -> transfer dst opt
+                // pingpong -> storage opt
+            )
+            // Copy the image from host memory
+            .copy_buffer_to_image(
+                &mut recording,
+                &buffer,
+                &reference_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                // Whole image
+                [BufferImageCopy {
+                    buffer_offset: 0,
+                    image_offset: Offset::ORIGIN,
+                    image_extent: extent,
+                    pitch: BufferPitch::PACKED,
+                    layers: SubresourceMip::ZERO,
+                }],
+            )
+            // Wait until import transfer is complete...
+            .barrier(
+                &mut recording,
+                sync::StageAccess::from_stage_access(
+                    sync::PipelineStages::TRANSFER,
+                    sync::WriteAccess::TRANSFER_WRITE,
+                )
+                .into(),
+                block_compute_read_write.into(),
+                // Todo: Transition
+                // reference -> storage opt
+            )
+            // TODO: bind import pipe TODO: bind descriptors of images
+            // Run a shader to initialize our first pingpong buffer with the
+            // reference image
+            .dispatch(
+                &mut recording,
+                [extent.width, extent.height, NonZero::<u32>::MIN],
+            );
+        // TODO: bind pingpong pipe
+        let mut readbuf = 0u32;
+
+        // Generate [1, X/2, X/4, X/8, ..., 1]
+        let mut spread = extent.width.max(extent.height).get() / 2;
+        let spread_iter = std::iter::once(1).chain(std::iter::from_fn(|| {
+            if spread == 0 {
+                None
+            } else {
+                let current = spread;
+                spread /= 2;
+                Some(current)
+            }
+        }));
+        // Iterate the algorithm. This for-loop is where the bulk of the work
+        // takes place, funny that it's the shortest part!
+        for _spread in spread_iter {
+            device
+                // TODO: swap buffers
+                // TODO: push constants
+                // Wait until previous shader is done before executing the
+                // next...
+                .barrier(
+                    &mut recording,
+                    wait_compute_write.into(),
+                    block_compute_read_write.into(),
+                )
+                .dispatch(
+                    &mut recording,
+                    [extent.width, extent.height, NonZero::<u32>::MIN],
+                );
+            // Swap the read image and write image for the next iteration.
+            readbuf = if readbuf == 0 { 1 } else { 0 };
+        }
+        // Export the final image back to the host buffer
+        device
+            .barrier(
+                &mut recording,
+                wait_compute_write.into(),
+                sync::StageAccess::from_stage_access(
+                    sync::PipelineStages::TRANSFER,
+                    sync::ReadWriteAccess::TRANSFER_READ,
+                )
+                .into(),
+                // TODO: Transition `pingpong[readbuf]` to TRANSFER_SRC
+            )
+            // It's safe to write to the buffer after the read at the start, due
+            // to the transfer -> compute shader -> transfer dependency chain.
+            .copy_image_to_buffer(
+                &mut recording,
+                &pingpong_array,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                &buffer,
+                [BufferImageCopy {
+                    buffer_offset: 0,
+                    image_offset: Offset::ORIGIN,
+                    image_extent: todo(), // wrongly expects a Layers >= 2 .
+                    pitch: BufferPitch::PACKED,
+                    layers: SubresourceMipArray::new(0, 0..1),
+                }],
+            )
+            .end_command_buffer(recording)?;
+
+        // =========================================================================================
+        // Execute!
+        let fence = device.create_fence::<Unsignaled>()?.into_inner();
+        let SubmitWithFence { pending_fence, .. } =
+            device.submit_with_fence(&mut queue, [], &[command_buffer.reference()], [], fence)?;
+        let fence = device.wait_fence(pending_fence)?;
+        // We can now read the buffer's memory to get our output result! A fence
+        // signal operation creates an everything-to-everything memory
+        // dependency, so there is no need for a final barrier for transfer
+        // write -> host read.
+
+        // =========================================================================================
+        // Cleanup
+        device
+            .destroy_fence(fence)
+            .destroy_command_pool(command_pool)
+            .destroy_pipeline(pingpong_pipe)
+            .destroy_pipeline(import_pipe)
+            .destroy_image(pingpong_array)
+            .destroy_image(reference_image)
+            .destroy_buffer(buffer);
+
+        ash_device.destroy_device(None);
+        instance.destroy_instance(None);
     }
-
-    // =========================================================================================
-    // Record a command buffer describing the whole operation
-
-    // =========================================================================================
-    // Execute!
 
     // =========================================================================================
     // Export UV image as RGB16.

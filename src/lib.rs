@@ -102,14 +102,15 @@
 //! sugar.
 //!
 //! Notable exclusions:
-//!  * Compressed/block-based/multiplanar image formats.
-//!  * Sparse objects.
+//! * Currenlty only VK1.0 is supported, this will change in the future.
+//! * Compressed/block-based/multiplanar image formats.
+//! * Sparse objects.
 //!
 //! Probable Extensions:
-//! * [ ] `EXT_swapchain` (and associated platform extensions)
-//! * [ ] `EXT_dynamic_rendering`
-//!   * [ ] `EXT_dynamic_rendering_local_read`
-//! * [ ] `EXT_portability_subset`
+//! * [ ] `KHR_swapchain` (and associated platform extensions)
+//! * [ ] `KHR_dynamic_rendering`
+//!   * [ ] `KHR_dynamic_rendering_local_read`
+//! * [ ] `KHR_portability_subset`
 //! * [ ] `KHR_dedicated_allocation`
 //! * [ ] `KHR_timeline_semaphore` (some learning is needed on my part uwu)
 //! * [ ] `EXT_mesh_shader` (i just like them a lot)
@@ -157,9 +158,66 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod sync;
 pub use ash::{self, vk};
 use core::{marker::PhantomData, num::NonZero};
 use vk::Handle;
+
+/// A boolean value in 32-bits.
+///
+/// It is immediate undefined behavior to observe a value that isn't 0 or 1 as
+/// this type.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Bool32 {
+    False = 0,
+    True = 1,
+}
+impl Bool32 {
+    pub const fn new(v: bool) -> Self {
+        if v { Self::True } else { Self::False }
+    }
+    pub const fn get(self) -> bool {
+        match self {
+            Self::True => true,
+            Self::False => false,
+        }
+    }
+}
+impl From<Bool32> for u32 {
+    fn from(value: Bool32) -> Self {
+        value as Self
+    }
+}
+impl From<bool> for Bool32 {
+    fn from(value: bool) -> Self {
+        Self::new(value)
+    }
+}
+impl From<Bool32> for bool {
+    fn from(value: Bool32) -> Self {
+        value.get()
+    }
+}
+
+/// A value which can be used as a push constant.
+///
+/// Avoid reading back from this type, as [`Bool32`] has strict requirements.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub union PushValue {
+    pub u32: u32,
+    pub i32: i32,
+    pub f32: f32,
+    pub bool: Bool32,
+}
+impl PushValue {
+    pub const fn bytes_of(array: &[Self]) -> &[u8] {
+        let len_bytes = core::mem::size_of_val(array);
+        // Align is strictly greater, of course.
+        unsafe { core::slice::from_raw_parts(array.as_ptr().cast(), len_bytes) }
+    }
+}
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -1345,7 +1403,7 @@ impl Semaphore<Pending> {
     /// Construct a wait operation. When passed into a queue submission
     /// operation, the device will wait for this semaphore to be signaled before
     /// any of the stages set in `wait_stage` can begin executing.
-    pub fn into_wait(self, wait_stage: vk::PipelineStageFlags) -> WaitSemaphore {
+    pub fn into_wait(self, wait_stage: sync::PipelineStages) -> WaitSemaphore {
         WaitSemaphore {
             semaphore: self,
             wait_stage,
@@ -1484,37 +1542,47 @@ thin_handle! {
 /// The stage of a pipeline a shader is for.
 pub trait ShaderStage {
     const FLAG: vk::ShaderStageFlags;
+    const PIPE_STAGE: sync::PipelineStages;
 }
 impl ShaderStage for Vertex {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::VERTEX_SHADER;
 }
 pub struct Geometry;
 impl ShaderStage for Geometry {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::GEOMETRY;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::GEOMETRY_SHADER;
 }
 pub struct TessControl;
 impl ShaderStage for TessControl {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_CONTROL;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::TESS_CONTROL_SHADER;
 }
 pub struct TessEvaluation;
 impl ShaderStage for TessEvaluation {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_EVALUATION;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::TESS_EVALUATION_SHADER;
 }
+/*
 pub struct TaskEXT;
 impl ShaderStage for TaskEXT {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TASK_EXT;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::TASK_SHADER_EXT;
 }
 pub struct MeshEXT;
 impl ShaderStage for MeshEXT {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::MESH_EXT;
-}
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::MESH_SHADER_EXT;
+}*/
 pub struct Fragment;
 impl ShaderStage for Fragment {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::FRAGMENT_SHADER;
 }
 pub struct Compute;
 impl ShaderStage for Compute {
     const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+    const PIPE_STAGE: sync::PipelineStages = sync::PipelineStages::COMPUTE_SHADER;
 }
 
 impl ShaderModule {
@@ -1649,11 +1717,11 @@ pub enum PreRasterShaders<'a> {
         )>,
         geometry: Option<SpecializedEntry<'a, Geometry>>,
     },
-    /// (Task?) -> Mesh
+    /*/// (Task?) -> Mesh
     Mesh(
         Option<SpecializedEntry<'a, TaskEXT>>,
         SpecializedEntry<'a, MeshEXT>,
-    ),
+    ),*/
 }
 /// The set of shaders that forms a complete graphics pipeline.
 pub struct GraphicsShaders<'a> {
@@ -1750,7 +1818,11 @@ thin_handle! {
 
 pub struct ComputePipelineCreateInfo<'a> {
     pub shader: SpecializedEntry<'a, Compute>,
-    pub layout: vk::PipelineLayout,
+    // Is this OK even with VK1.3 or KHR_maintainence4? "must not be accessed"
+    // during any call this is passed to. Mutably? Immutably? Wargh???? Surely
+    // not mutably as then multiple pipes can't be made with a shared layout
+    // similtaneously and that feels silly.
+    pub layout: &'a vk::PipelineLayout,
 }
 
 /// A render pass, describing the flow of rendering operations on a Framebuffer.
@@ -1917,7 +1989,7 @@ thin_handle!(
 pub struct WaitSemaphore {
     pub semaphore: Semaphore<Pending>,
     /// These stages must wait before beginning execution.
-    pub wait_stage: vk::PipelineStageFlags,
+    pub wait_stage: sync::PipelineStages,
 }
 
 #[must_use = "the handles contained will be leaked"]
@@ -2009,7 +2081,11 @@ impl<'device> Device<'device> {
                             .each_ref()
                             .map(|wait| wait.semaphore.handle()),
                     )
-                    .wait_dst_stage_mask(&wait_semaphores.each_ref().map(|wait| wait.wait_stage))
+                    .wait_dst_stage_mask(
+                        &wait_semaphores
+                            .each_ref()
+                            .map(|wait| wait.wait_stage.into_flags()),
+                    )
                     .command_buffers(ThinHandle::handles_of(buffers))
                     .signal_semaphores(ThinHandle::handles_of(&signal_semaphores))],
                 signal_fence.handle(),
@@ -2553,7 +2629,7 @@ impl<'device> Device<'device> {
         }
         let infos = infos.each_ref().map(|info| {
             vk::ComputePipelineCreateInfo::default()
-                .layout(info.layout)
+                .layout(*info.layout)
                 .stage(info.shader.create_info())
         });
         let mut output = core::mem::MaybeUninit::<[vk::Pipeline; N]>::uninit();
@@ -2624,6 +2700,28 @@ impl<'device> Device<'device> {
             _pool: PhantomData,
         })
     }
+    pub unsafe fn push_constants<
+        'a,
+        'b,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+    >(
+        &'a self,
+        buffer: &'b mut RecordingBuffer<Level, MaybeInsideRender>,
+        layout: &'b PipelineLayout<()>,
+        stages: vk::ShaderStageFlags,
+        offset_words: u32,
+        constants: &'b [PushValue],
+    ) -> &'a Self {
+        self.0.cmd_push_constants(
+            buffer.handle(),
+            layout.handle(),
+            stages,
+            offset_words * 4,
+            PushValue::bytes_of(constants),
+        );
+        self
+    }
     pub unsafe fn bind_vertex_buffers<
         'a,
         'b,
@@ -2667,19 +2765,25 @@ impl<'device> Device<'device> {
             .map_err(AllocationError::from_vk)?;
         Ok(self)
     }
-    pub unsafe fn bind_pipeline<
-        'a,
-        'b,
-        Kind: BindPoint,
-        Level: CommandBufferLevel,
-        MaybeInsideRender: CommandBufferState,
-    >(
+    pub unsafe fn barrier<'a, Level: CommandBufferLevel>(
         &'a self,
-        buffer: &'b mut RecordingBuffer<Level, MaybeInsideRender>,
-        pipeline: &'b Pipeline<Kind>,
+        buffer: &'_ mut RecordingBuffer<Level, OutsideRender>,
+        wait_for: sync::MemoryCondition,
+        block: sync::MemoryBlock,
     ) -> &'a Self {
-        self.0
-            .cmd_bind_pipeline(buffer.handle(), Kind::BIND_POINT, pipeline.handle());
+        let (src_stage, src_access) = wait_for.into_stage_access();
+        let (dst_stage, dst_access) = block.into_stage_access();
+        self.0.cmd_pipeline_barrier(
+            buffer.handle(),
+            src_stage,
+            dst_stage,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(dst_access)],
+            &[],
+            &[],
+        );
         self
     }
     pub unsafe fn dispatch<'a, Level: CommandBufferLevel, MaybeInsideRender: CommandBufferState>(
@@ -2739,7 +2843,7 @@ impl<'device> Device<'device> {
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
-        image: Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
+        image: &Image<SuperAccess, Dim, ColorFormat, SingleSampled>,
         image_layout: vk::ImageLayout,
         buffer: impl AsRef<Buffer<TransferDst>>,
         regions: [BufferImageCopy<Dim>; N],
