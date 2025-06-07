@@ -60,7 +60,10 @@ pub fn main() -> Result<()> {
             // Check it has all the features we need:
             .filter(|&&phys| {
                 let r8unorm = instance
-                    .get_physical_device_format_properties(phys, ColorFormat::R8Unorm.format())
+                    .get_physical_device_format_properties(
+                        phys,
+                        image::ColorFormat::R8Unorm.format(),
+                    )
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE);
@@ -68,7 +71,10 @@ pub fn main() -> Result<()> {
                     return false;
                 }
                 instance
-                    .get_physical_device_format_properties(phys, ColorFormat::Rg16Uint.format())
+                    .get_physical_device_format_properties(
+                        phys,
+                        image::ColorFormat::Rg16Uint.format(),
+                    )
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE)
@@ -233,11 +239,12 @@ pub fn main() -> Result<()> {
         // until all previous compute shaders have finished and flushes their
         // writes to any storage.
         let wait_compute_write =
-            sync::StageAccess::shader_access::<Compute>(sync::WriteAccess::SHADER_WRITE);
+            barrier::StageAccess::shader_access::<Compute>(barrier::WriteAccess::SHADER_WRITE);
         // Specifies a block on all future compute shaders and invalidates their
         // storage caches for reads and writes.
-        let block_compute_read_write =
-            sync::StageAccess::shader_access::<Compute>(sync::ReadWriteAccess::SHADER_READ_WRITE);
+        let block_compute_read_write = barrier::StageAccess::shader_access::<Compute>(
+            barrier::ReadWriteAccess::SHADER_READ_WRITE,
+        );
 
         // Import the image from the host buffer
         device
@@ -245,12 +252,12 @@ pub fn main() -> Result<()> {
             .barrier(
                 &mut recording,
                 // We aren't waiting on any previous operations.
-                sync::MemoryCondition::None,
+                barrier::MemoryCondition::None,
                 // Block transfer from occuring until the image is in the right
                 // layout to accept it.
-                sync::StageAccess::from_stage_access(
-                    sync::PipelineStages::TRANSFER,
-                    sync::ReadWriteAccess::TRANSFER_WRITE,
+                barrier::StageAccess::from_stage_access(
+                    barrier::PipelineStages::TRANSFER,
+                    barrier::ReadWriteAccess::TRANSFER_WRITE,
                 )
                 .into(),
                 // TODO: transition images.
@@ -275,9 +282,9 @@ pub fn main() -> Result<()> {
             // Wait until import transfer is complete...
             .barrier(
                 &mut recording,
-                sync::StageAccess::from_stage_access(
-                    sync::PipelineStages::TRANSFER,
-                    sync::WriteAccess::TRANSFER_WRITE,
+                barrier::StageAccess::from_stage_access(
+                    barrier::PipelineStages::TRANSFER,
+                    barrier::WriteAccess::TRANSFER_WRITE,
                 )
                 .into(),
                 block_compute_read_write.into(),
@@ -330,9 +337,9 @@ pub fn main() -> Result<()> {
             .barrier(
                 &mut recording,
                 wait_compute_write.into(),
-                sync::StageAccess::from_stage_access(
-                    sync::PipelineStages::TRANSFER,
-                    sync::ReadWriteAccess::TRANSFER_READ,
+                barrier::StageAccess::from_stage_access(
+                    barrier::PipelineStages::TRANSFER,
+                    barrier::ReadWriteAccess::TRANSFER_READ,
                 )
                 .into(),
                 // TODO: Transition `pingpong[readbuf]` to TRANSFER_SRC
