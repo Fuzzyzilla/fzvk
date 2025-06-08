@@ -1,25 +1,7 @@
-[package]
-name = "fzvk"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["fzvk", "fzvk-shader"]
 
-[dependencies]
-ash = { version = "0.38.0", default-features = false }
-tinyvec = { version = "1.9.0", default-features = false }
-
-[features]
-default = ["alloc"]
-# Some helper functions for reading dynamically-sized data from the
-# implementation
-alloc = []
-
-[dev-dependencies]
-# A way to output images. (For simplicity, most examples will forego a full
-# swapchain implementation)
-png = "0.17.16"
-# Link to loader for examples (linking is good for programs which cannot exist
-# without vk)
-ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
-# Convinient error reporting for non-libraries.
-anyhow = "1.0.98"
-fzvk-shader = { workspace = true }
+[workspace.dependencies]
+fzvk-shader = {path = "fzvk-shader"}
+fzvk = {path = "fzvk"}
