@@ -134,7 +134,7 @@
 //!   * [X] Compute
 //!   * [X] Modules
 //!     * [X] Specialization
-//!       * [ ] Okay but do it better (proc_macro)
+//!       * [X] Okay but do it better (proc_macro)
 //! * [ ] Sync primitives
 //!   * [X] Fences
 //!   * [X] Semaphores
@@ -661,14 +661,32 @@ impl<'device> Device<'device> {
     pub unsafe fn wait_idle(&self, _queues: &mut [&mut Queue]) -> Result<(), SubmitError> {
         self.0.device_wait_idle().map_err(SubmitError::from_vk)
     }
-    pub unsafe fn create_module(&self, spirv: &[u32]) -> Result<ShaderModule, AllocationError> {
+    pub unsafe fn create_module<Module: StaticSpirV>(
+        &self,
+    ) -> Result<ShaderModule<Module>, AllocationError> {
+        debug_assert!(!Module::SPIRV.is_empty());
+        self.0
+            .create_shader_module(
+                &vk::ShaderModuleCreateInfo::default().code(Module::SPIRV),
+                None,
+            )
+            .map(|handle| ThinHandle::from_handle(handle))
+            .map_err(AllocationError::from_vk)
+    }
+    pub unsafe fn create_dynamic_module(
+        &self,
+        spirv: &[u32],
+    ) -> Result<DynamicShaderModule, AllocationError> {
         debug_assert!(!spirv.is_empty());
         self.0
             .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spirv), None)
-            .map(|handle| ShaderModule::from_handle(handle))
+            .map(|handle| DynamicShaderModule::from_handle(handle))
             .map_err(AllocationError::from_vk)
     }
-    pub unsafe fn destroy_module(&self, module: ShaderModule) -> &Self {
+    pub unsafe fn destroy_module<Module: ThinHandle<Handle = vk::ShaderModule>>(
+        &self,
+        module: Module,
+    ) -> &Self {
         self.0.destroy_shader_module(module.into_handle(), None);
         self
     }

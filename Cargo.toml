@@ -22,3 +22,4 @@ png = "0.17.16"
 ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
 # Convinient error reporting for non-libraries.
 anyhow = "1.0.98"
+fzvk-shader = { workspace = true }

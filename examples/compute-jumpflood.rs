@@ -8,6 +8,47 @@ fn todo<T>() -> T {
     todo!()
 }
 
+/*mod vertex {
+    fzvk_shader::glsl! {
+        r"#version 460 core
+        #pragma shader_stage(compute)
+        layout(constant_id = 0) const int i = -4;
+        layout(constant_id = 1) const uint j = 1;
+        layout(constant_id = 2) const float k = 103.5;
+        layout(constant_id = 107) const bool owo = true;
+
+        layout(local_size_x_id = 3, local_size_y = 4, local_size_z_id = 4) in;
+
+        void main() {
+        }
+        "
+    }
+}*/
+mod import {
+    fzvk_shader::glsl! {
+        r"#version 460 core
+        #pragma shader_stage(compute)
+
+        layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+        void main() {
+        }
+        "
+    }
+}
+mod pingpong {
+    fzvk_shader::glsl! {
+        r"#version 460 core
+        #pragma shader_stage(compute)
+        
+        layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+        void main() {
+        }
+        "
+    }
+}
+
 use anyhow::Result;
 use ash::vk;
 use fzvk::*;
@@ -198,12 +239,11 @@ pub fn main() -> Result<()> {
         // Create the compute pipeline that will do the work Shader that takes
         // our reference image, and performs the initial population of our
         // pingpong image.
-        let import_module = device.create_module(&[todo()])?;
-        let import_shader = import_module.main(Compute).specialize(&());
+        let import_module = device.create_module::<import::Module>()?;
+        let import_shader = import_module.entry(import::MAIN).specialize(&());
         // Shader that iteratively refines between the two pingpong images.
-        let pingpong_module = device.create_module(&[todo()])?;
-        let pingpong_shader = pingpong_module.main(Compute).specialize(&());
-
+        let pingpong_module = device.create_module::<pingpong::Module>()?;
+        let pingpong_shader = pingpong_module.entry(pingpong::MAIN).specialize(&());
         let empty_layout = device.create_pipeline_layout::<()>()?;
 
         let [import_pipe, pingpong_pipe] = device.create_compute_pipelines(

@@ -31,6 +31,7 @@ impl BufferUsage for Index {
     const FLAGS: vk::BufferUsageFlags = vk::BufferUsageFlags::INDEX_BUFFER;
 }
 /// A buffer that can be bound to a command buffer as a vertex buffer.
+#[derive(Clone, Copy)]
 pub struct Vertex;
 impl BufferUsage for Vertex {
     const FLAGS: vk::BufferUsageFlags = vk::BufferUsageFlags::VERTEX_BUFFER;
