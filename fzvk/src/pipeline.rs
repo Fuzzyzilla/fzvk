@@ -1,5 +1,5 @@
 //! Pipelines, Shaders, Renderpasses, Framebuffers galore!
-use super::{Bool32, Pred, Satisified, ThinHandle, sync, usage::Vertex, vk};
+use super::{Bool32, NonNull, Pred, Satisified, ThinHandle, sync, usage::Vertex, vk};
 use core::marker::PhantomData;
 
 #[derive(Clone, Copy)]
@@ -283,11 +283,11 @@ pub enum PreRasterShaders<'a> {
         )>,
         geometry: Option<SpecializedEntry<'a, Geometry>>,
     },
-    /*/// (Task?) -> Mesh
+    /// (Task?) -> Mesh
     Mesh(
         Option<SpecializedEntry<'a, TaskEXT>>,
         SpecializedEntry<'a, MeshEXT>,
-    ),*/
+    ),
 }
 /// The set of shaders that forms a complete graphics pipeline.
 pub struct GraphicsShaders<'a> {
@@ -311,19 +311,26 @@ impl<'a> GraphicsShaders<'a> {
         } = self;
         // This default()s the array. Whyy?
         let mut vec = tinyvec::ArrayVec::new();
-        if let PreRasterShaders::Vertex {
-            vertex,
-            tess,
-            geometry,
-        } = &pre_raster
-        {
-            vec.push(vertex.create_info());
-            if let Some((tessc, tesse)) = tess {
-                vec.push(tessc.create_info());
-                vec.push(tesse.create_info());
+        match pre_raster {
+            PreRasterShaders::Vertex {
+                vertex,
+                tess,
+                geometry,
+            } => {
+                vec.push(vertex.create_info());
+                if let Some((tessc, tesse)) = tess {
+                    vec.push(tessc.create_info());
+                    vec.push(tesse.create_info());
+                }
+                if let Some(geometry) = geometry {
+                    vec.push(geometry.create_info());
+                }
             }
-            if let Some(geometry) = geometry {
-                vec.push(geometry.create_info());
+            PreRasterShaders::Mesh(task, mesh) => {
+                if let Some(task) = task {
+                    vec.push(task.create_info());
+                }
+                vec.push(mesh.create_info());
             }
         }
         if let Some(fragment) = fragment {
@@ -355,11 +362,15 @@ crate::thin_handle! {
     pub struct PipelineCache(vk::PipelineCache);
 }
 #[repr(transparent)]
-pub struct BorrowedPipelineCache<'a>(vk::PipelineCache, PhantomData<&'a PipelineCache>);
+pub struct BorrowedPipelineCache<'a>(NonNull<vk::PipelineCache>, PhantomData<&'a PipelineCache>);
 impl<'a> From<&'a PipelineCache> for BorrowedPipelineCache<'a> {
     fn from(value: &'a PipelineCache) -> Self {
-        unsafe { Self::from_handle(value.handle()) }
+        // Safety - There is no typestate.
+        unsafe { Self::from_handle_unchecked(value.handle()) }
     }
+}
+unsafe impl ThinHandle for BorrowedPipelineCache<'_> {
+    type Handle = vk::PipelineCache;
 }
 /// A type usable for pipeline push constants, consisting of several static
 /// ranges pointing to members of `self`.
@@ -371,9 +382,6 @@ pub unsafe trait PushConstant {
 }
 unsafe impl PushConstant for () {
     const RANGES: &'static [vk::PushConstantRange] = &[];
-}
-unsafe impl ThinHandle for BorrowedPipelineCache<'_> {
-    type Handle = vk::PipelineCache;
 }
 crate::thin_handle! {
     /// # Typestates
@@ -398,7 +406,7 @@ pub struct ComputePipelineCreateInfo<'a> {
 ///   renderpass consists of.
 #[repr(transparent)]
 #[must_use = "dropping the handle will not destroy the renderpass and may leak resources"]
-pub struct RenderPass<const SUBPASSES: usize>(vk::RenderPass)
+pub struct RenderPass<const SUBPASSES: usize>(NonNull<vk::RenderPass>)
 where
     SubpassCount<SUBPASSES>: ValidSubpassCount;
 unsafe impl<const N: usize> ThinHandle for RenderPass<N>

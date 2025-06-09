@@ -1,5 +1,5 @@
 use super::{
-    ThinHandle,
+    NonNull, ThinHandle,
     image::Dimensionality,
     pipeline::{SubpassCount, ValidSubpassCount},
     vk,
@@ -44,13 +44,15 @@ crate::thin_handle! {
 }
 impl<Level: CommandBufferLevel> CommandBuffer<Level> {
     pub fn reference(&self) -> CommandBufferReference<Level> {
-        CommandBufferReference(unsafe { self.handle() }, PhantomData)
+        // Safety - known non null since it came from self. Immutable reference
+        // won't ever change the typestate.
+        unsafe { ThinHandle::from_handle_unchecked(self.handle()) }
     }
 }
 
 #[repr(transparent)]
 pub struct CommandBufferReference<'a, Level: CommandBufferLevel>(
-    vk::CommandBuffer,
+    NonNull<vk::CommandBuffer>,
     PhantomData<&'a CommandBuffer<Level>>,
 );
 unsafe impl<Level: CommandBufferLevel> ThinHandle for CommandBufferReference<'_, Level> {
@@ -103,7 +105,9 @@ impl<const REMAINING_PASSES: usize> CommandBufferState for RemainingSubpasses<RE
 ///   command buffer is currently "inside" a render pass, and can thus issue
 ///   `draw` commands.
 pub struct RecordingBuffer<'a, Level: CommandBufferLevel, State: CommandBufferState> {
-    buffer: vk::CommandBuffer,
+    #[allow(unused)]
+    // It's not actually unused. ThinHandle trait reads it!
+    buffer: NonNull<vk::CommandBuffer>,
     _typed_buffer: PhantomData<&'a mut CommandBuffer<Level>>,
     _state: PhantomData<State>,
     _pool: PhantomData<&'a mut CommandPool>,

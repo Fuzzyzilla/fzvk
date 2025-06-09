@@ -1,15 +1,14 @@
 //! `vkBuffer`
-use crate::{ThinHandle, usage::*, vk};
+use crate::{NonNull, ThinHandle, usage::*, vk};
 use core::{marker::PhantomData, num::NonZero};
-/// An owned image view handle.
-/// # Typestates
-/// * `Usage`: The `vkBufferUsageFlags` this image is statically known to
-///   possess (e.g. `(Storage, TransferSrc)`)
-#[repr(transparent)]
-#[must_use = "dropping the handle will not destroy the buffer and may leak resources"]
-pub struct Buffer<Usage: BufferUsage>(vk::Buffer, PhantomData<Usage>);
-unsafe impl<Usage: BufferUsage> ThinHandle for Buffer<Usage> {
-    type Handle = vk::Buffer;
+
+crate::thin_handle! {
+    /// An owned image view handle.
+    /// # Typestates
+    /// * `Usage`: The `vkBufferUsageFlags` this image is statically known to
+    ///   possess (e.g. `(Storage, TransferSrc)`)
+    #[must_use = "dropping the handle will not destroy the buffer and may leak resources"]
+    pub struct Buffer<Usage: BufferUsage>(vk::Buffer);
 }
 impl<SubUsage: BufferUsage, SuperUsage: BufferSuperset<SubUsage> + BufferUsage>
     AsMut<Buffer<SubUsage>> for Buffer<SuperUsage>
@@ -51,7 +50,9 @@ impl<AcUsageess: BufferUsage> Buffer<AcUsageess> {
     {
         // Safety: Subset<> bound guarantees Buffer<SuperUsage> *is a*
         // Buffer<SubUsage>.
-        unsafe { BufferReference::from_handle(self.handle()) }
+
+        // Known non-null since self is non-null.
+        unsafe { BufferReference::from_handle_unchecked(self.handle()) }
     }
     pub fn as_subusage<SubUsage>(&self) -> &Buffer<SubUsage>
     where
@@ -88,7 +89,7 @@ impl<AcUsageess: BufferUsage> Buffer<AcUsageess> {
 /// to the implementation.
 #[repr(transparent)]
 pub struct BufferReference<'a, Usage: BufferUsage>(
-    vk::Buffer,
+    NonNull<vk::Buffer>,
     PhantomData<(Usage, &'a Buffer<Usage>)>,
 );
 

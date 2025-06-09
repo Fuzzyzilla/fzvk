@@ -1,6 +1,5 @@
 //! Fences, Semaphores, Barriers galore!
 use super::{ShaderStage, ThinHandle, vk};
-use core::marker::PhantomData;
 
 pub mod barrier {
     //! Types for describing execution and/or memory dependencies.
@@ -516,17 +515,15 @@ impl KnownFenceState for Unsignaled {
 /// become signaled due to a previous queue submission operation.
 pub struct Pending;
 impl FenceState for Pending {}
-/// A synchronization primitive for GPU->CPU communication.
-/// # Typestate
-/// * `State`: Whether the fence is signaled, unsignaled, or in the process of
-///   becoming signaled.
-#[repr(transparent)]
-#[must_use = "dropping the handle will not destroy the fence and may leak resources"]
-pub struct Fence<State: FenceState>(vk::Fence, PhantomData<State>);
-
-unsafe impl<State: FenceState> ThinHandle for Fence<State> {
-    type Handle = vk::Fence;
+crate::thin_handle! {
+    /// A synchronization primitive for GPU->CPU communication.
+    /// # Typestate
+    /// * `State`: Whether the fence is signaled, unsignaled, or in the process
+    ///   of becoming signaled.
+    #[must_use = "dropping the handle will not destroy the fence and may leak resources"]
+    pub struct Fence<State: FenceState>(vk::Fence);
 }
+
 crate::thin_handle! {
     /// A synchronization primitive for CPU->GPU communication and fine-grained
     /// *intra*-queue GPU->GPU dependencies.

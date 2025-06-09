@@ -165,7 +165,7 @@ pub fn main() -> Result<()> {
     };
 
     let device = Device::from_ash(&ash_device);
-    let mut queue = unsafe { Queue::from_handle(queue) };
+    let mut queue = unsafe { Queue::from_handle(queue).unwrap() };
     // =========================================================================================
     // Import image, and take only its Alpha channel.
     let extent = Extent2D {

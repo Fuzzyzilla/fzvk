@@ -1,11 +1,10 @@
 //! `vkImage[View]`
 use crate::{
-    ThinHandle,
     buffer::{BufferPitch, RowPitch, RowSlicePitch},
     usage::ImageUsage,
     vk,
 };
-use core::{marker::PhantomData, num::NonZero};
+use core::num::NonZero;
 
 /// A trait representing the extent of a image of various dimensionalities.
 pub unsafe trait Extent {
@@ -415,45 +414,35 @@ unsafe impl ImageSamples for MultiSampled {
     }
 }
 
-/// An owned image handle.
-/// # Typestates
-/// * `Usage`: The `VkImageUsageFlags` this image is statically known to possess
-///   (e.g. `(Storage, TransferSrc)`)
-/// * `Dim`: The dimensionality of an image, including whether it is an array of
-///   images (e.g. [`D2`])
-/// * `Format`: The Image aspects this image's format is known to possess (e.g.
-///   [`ColorFormat`]).
-/// * `Samples`: Whether the image is [single-](SingleSampled) or
-///   [multi-](MultiSampled)sampled.
-#[repr(transparent)]
-#[must_use = "dropping the handle will not destroy the image and may leak resources"]
-pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat, Samples: ImageSamples>(
-    vk::Image,
-    PhantomData<(Usage, Dim, Format, Samples)>,
-);
-unsafe impl<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat, Samples: ImageSamples>
-    ThinHandle for Image<Usage, Dim, Format, Samples>
-{
-    type Handle = vk::Image;
+crate::thin_handle! {
+    /// An owned image handle.
+    /// # Typestates
+    /// * `Usage`: The `VkImageUsageFlags` this image is statically known to
+    ///   possess (e.g. `(Storage, TransferSrc)`)
+    /// * `Dim`: The dimensionality of an image, including whether it is an
+    ///   array of images (e.g. [`D2`])
+    /// * `Format`: The Image aspects this image's format is known to possess
+    ///   (e.g. [`ColorFormat`]).
+    /// * `Samples`: Whether the image is [single-](SingleSampled) or
+    ///   [multi-](MultiSampled)sampled.
+    #[must_use = "dropping the handle will not destroy the image and may leak resources"]
+    pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat, Samples: ImageSamples>(
+        vk::Image
+    );
 }
 
-/// An owned image view handle.
-/// # Typestates
-/// * `Usage`: The `VkImageUsageFlags` this image is statically known to possess
-///   (e.g. `(Storage, TransferSrc)`), which is a subset of the usages of the
-///   parent [`Image`].
-/// * `Dim`: The dimensionality of an image, including whether it is an array of
-///   images (e.g. [`D2`])
-/// * `Format`: The Image aspects this image's format is known to possess (e.g.
-///   [`ColorFormat`]).
-#[repr(transparent)]
-#[must_use = "dropping the handle will not destroy the view and may leak resources"]
-pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat>(
-    vk::ImageView,
-    PhantomData<(Usage, Dim, Format)>,
-);
-unsafe impl<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat> ThinHandle
-    for ImageView<Usage, Dim, Format>
-{
-    type Handle = vk::ImageView;
+crate::thin_handle! {
+        /// An owned image view handle.
+    /// # Typestates
+    /// * `Usage`: The `VkImageUsageFlags` this image is statically known to
+    ///   possess (e.g. `(Storage, TransferSrc)`), which is a subset of the
+    ///   usages of the parent [`Image`].
+    /// * `Dim`: The dimensionality of an image, including whether it is an
+    ///   array of images (e.g. [`D2`])
+    /// * `Format`: The Image aspects this image's format is known to possess
+    ///   (e.g. [`ColorFormat`]).
+    #[must_use = "dropping the handle will not destroy the view and may leak resources"]
+    pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat>(
+        vk::ImageView
+    );
 }
