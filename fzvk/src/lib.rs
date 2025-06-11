@@ -158,12 +158,13 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod handle;
-pub use handle::*;
 pub mod buffer;
 pub use buffer::*;
 pub mod command_buffer;
 pub use command_buffer::*;
+pub mod format;
+pub mod handle;
+pub use handle::*;
 pub mod image;
 pub use image::*;
 pub mod pipeline;
