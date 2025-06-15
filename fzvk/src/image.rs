@@ -1,10 +1,50 @@
 //! `vkImage[View]`
 use crate::{
     buffer::{BufferPitch, RowPitch, RowSlicePitch},
+    format,
     usage::ImageUsage,
     vk,
 };
 use core::num::NonZero;
+
+/// Specifies how an image view should source it's channels from the underlying
+/// image.
+///
+/// For example, if the `r` field is set to the `B` swizzle, texel fetches from
+/// the image view will pull the red color component from the blue channel of
+/// the underlying image.
+#[derive(Clone, Copy)]
+pub struct ComponentMapping {
+    pub r: vk::ComponentSwizzle,
+    pub g: vk::ComponentSwizzle,
+    pub b: vk::ComponentSwizzle,
+    pub a: vk::ComponentSwizzle,
+}
+impl ComponentMapping {
+    /// Identity swizzle, each component is mapped to itself.
+    pub const IDENTITY: Self = Self::splat(vk::ComponentSwizzle::IDENTITY);
+    /// Make a swizzle with every component mapped to the same `channel`.
+    pub const fn splat(channel: vk::ComponentSwizzle) -> Self {
+        Self {
+            r: channel,
+            g: channel,
+            b: channel,
+            a: channel,
+        }
+    }
+}
+impl From<ComponentMapping> for vk::ComponentMapping {
+    fn from(value: ComponentMapping) -> Self {
+        let ComponentMapping { r, g, b, a } = value;
+        vk::ComponentMapping { r, g, b, a }
+    }
+}
+/// The identity swizzle.
+impl Default for ComponentMapping {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
 
 /// A trait representing the extent of a image of various dimensionalities.
 pub unsafe trait Extent {
@@ -178,7 +218,9 @@ impl Offset for Offset3D {
 /// The number of images in an array, two or greater.
 ///
 /// In vulkan, the only difference between an image and an array image is
-/// whether it is created with an array count > 1.
+/// whether it is created with an array count > 1. Note that this differs for
+/// views, where an array view with 1 layer and a regular view are distict
+/// concepts.
 pub struct ArrayCount(NonZero<u32>);
 impl ArrayCount {
     /// The minimum array count.
@@ -214,12 +256,6 @@ impl MipCount {
     pub const ONE: Self = Self(NonZero::<u32>::MIN);
 }
 
-#[repr(u32)]
-pub enum Aspect {
-    Color = vk::ImageAspectFlags::COLOR.as_raw(),
-    Depth = vk::ImageAspectFlags::DEPTH.as_raw(),
-    Stencil = vk::ImageAspectFlags::STENCIL.as_raw(),
-}
 /// The number of dimensions in an image, including whether it's an array.
 pub trait Dimensionality {
     /// The size in each dimension, plus an array layer count if applicable.
@@ -231,7 +267,8 @@ pub trait Dimensionality {
     /// 1-dimensional buffer addresses.
     type Pitch: BufferPitch;
     /// Vulkan representation of this dimensionality.
-    const TYPE: vk::ImageType;
+    const IMAGE_TYPE: vk::ImageType;
+    const VIEW_TYPE: vk::ImageViewType;
 }
 pub struct BufferPitchD3;
 /// Typestate for a 1-dimensional image.
@@ -249,38 +286,43 @@ impl Dimensionality for D1 {
     type Offset = Offset1D;
     type Pitch = ();
     type SubresourceLayers = SubresourceMip;
-    const TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
+    const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
+    const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_1D;
 }
 impl Dimensionality for D1Array {
     type Extent = Extent1DArray;
     type Offset = Offset1D;
     type Pitch = RowPitch;
     type SubresourceLayers = SubresourceMipArray;
-    const TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
+    const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
+    const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_1D_ARRAY;
 }
 impl Dimensionality for D2 {
     type Extent = Extent2D;
     type Offset = Offset2D;
     type Pitch = RowPitch;
     type SubresourceLayers = SubresourceMip;
-    const TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
+    const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
+    const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_2D;
 }
 impl Dimensionality for D2Array {
     type Extent = Extent2DArray;
     type Offset = Offset2D;
     type Pitch = RowSlicePitch;
     type SubresourceLayers = SubresourceMipArray;
-    const TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
+    const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
+    const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_2D_ARRAY;
 }
 impl Dimensionality for D3 {
     type Extent = Extent3D;
     type Offset = Offset3D;
     type Pitch = RowSlicePitch;
     type SubresourceLayers = SubresourceMip;
-    const TYPE: vk::ImageType = vk::ImageType::TYPE_3D;
+    const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_3D;
+    const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_3D;
 }
 pub trait SubresourceLayers {
-    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers;
+    fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers;
 }
 /// A single mip level of a non-array image.
 pub struct SubresourceMip(pub u32);
@@ -288,9 +330,9 @@ impl SubresourceMip {
     pub const ZERO: Self = Self(0);
 }
 impl SubresourceLayers for SubresourceMip {
-    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers {
+    fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
         vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::from_raw(aspect as _),
+            aspect_mask: aspect,
             mip_level: self.0,
             base_array_layer: 0,
             layer_count: 1,
@@ -340,9 +382,9 @@ impl SubresourceMipArray {
     }
 }
 impl SubresourceLayers for SubresourceMipArray {
-    fn subresource_layers(&self, aspect: Aspect) -> vk::ImageSubresourceLayers {
+    fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
         vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::from_raw(aspect as _),
+            aspect_mask: aspect,
             mip_level: self.mip,
             base_array_layer: self.start_layer,
             layer_count: self.layer_count.get(),
@@ -355,34 +397,6 @@ pub trait ResourceRange {
 }
 pub struct SubresourceRange(pub core::ops::Range<u32>);
 pub struct LayeredSubresourceRange{pub mips: core::ops::Range<u32>, pub layers: core::ops::Range<u32>}*/
-
-/// A value representing an image's pixel format.
-pub trait ImageFormat {
-    fn format(&self) -> vk::Format;
-}
-/// Formats with only a color aspect.
-#[derive(Clone, Copy)]
-#[repr(i32)]
-pub enum ColorFormat {
-    Rgba8Unorm = vk::Format::R8G8B8A8_UNORM.as_raw(),
-    Rgba8Srgb = vk::Format::R8G8B8A8_SRGB.as_raw(),
-    R8Unorm = vk::Format::R8_UNORM.as_raw(),
-    Rg8Uint = vk::Format::R8G8_UINT.as_raw(),
-    Rg16Uint = vk::Format::R16G16_UINT.as_raw(),
-}
-impl ImageFormat for ColorFormat {
-    fn format(&self) -> vk::Format {
-        vk::Format::from_raw(*self as _)
-    }
-}
-#[derive(Clone, Copy)]
-/// Formats with a depth and/or stencil aspect.
-pub enum DepthStencilFormat {}
-impl ImageFormat for DepthStencilFormat {
-    fn format(&self) -> vk::Format {
-        vk::Format::from_raw(*self as _)
-    }
-}
 
 pub unsafe trait ImageSamples {
     fn flag(self) -> vk::SampleCountFlags;
@@ -421,28 +435,27 @@ crate::thin_handle! {
     ///   possess (e.g. `(Storage, TransferSrc)`)
     /// * `Dim`: The dimensionality of an image, including whether it is an
     ///   array of images (e.g. [`D2`])
-    /// * `Format`: The Image aspects this image's format is known to possess
-    ///   (e.g. [`ColorFormat`]).
+    /// * `Format`: The texel format of the image.
     /// * `Samples`: Whether the image is [single-](SingleSampled) or
     ///   [multi-](MultiSampled)sampled.
     #[must_use = "dropping the handle will not destroy the image and may leak resources"]
-    pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat, Samples: ImageSamples>(
+    pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
         vk::Image
     );
 }
 
 crate::thin_handle! {
-        /// An owned image view handle.
+    /// An owned image view handle.
     /// # Typestates
     /// * `Usage`: The `VkImageUsageFlags` this image is statically known to
-    ///   possess (e.g. `(Storage, TransferSrc)`), which is a subset of the
-    ///   usages of the parent [`Image`].
+    ///   possess (e.g. `(Storage, TransferSrc)`)
     /// * `Dim`: The dimensionality of an image, including whether it is an
     ///   array of images (e.g. [`D2`])
-    /// * `Format`: The Image aspects this image's format is known to possess
-    ///   (e.g. [`ColorFormat`]).
+    /// * `Format`: The texel format of the image.
+    /// * `Samples`: Whether the image is [single-](SingleSampled) or
+    ///   [multi-](MultiSampled)sampled.
     #[must_use = "dropping the handle will not destroy the view and may leak resources"]
-    pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: ImageFormat>(
+    pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
         vk::ImageView
     );
 }

@@ -28,7 +28,7 @@ mod import {
     fzvk_shader::glsl! {
         r"#version 460 core
         #pragma shader_stage(compute)
-
+        
         layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
         void main() {
@@ -51,7 +51,7 @@ mod pingpong {
 
 use anyhow::Result;
 use ash::vk;
-use fzvk::*;
+use fzvk::{format::Format, *};
 pub fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
@@ -101,10 +101,7 @@ pub fn main() -> Result<()> {
             // Check it has all the features we need:
             .filter(|&&phys| {
                 let r8unorm = instance
-                    .get_physical_device_format_properties(
-                        phys,
-                        image::ColorFormat::R8Unorm.format(),
-                    )
+                    .get_physical_device_format_properties(phys, format::R8_UNORM::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE);
@@ -112,10 +109,7 @@ pub fn main() -> Result<()> {
                     return false;
                 }
                 instance
-                    .get_physical_device_format_properties(
-                        phys,
-                        image::ColorFormat::Rg16Uint.format(),
-                    )
+                    .get_physical_device_format_properties(phys, format::R16G16_UINT::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE)
@@ -203,7 +197,7 @@ pub fn main() -> Result<()> {
             (TransferDst, Storage),
             extent,
             MipCount::ONE,
-            ColorFormat::R8Unorm,
+            format::R8_UNORM,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
@@ -216,7 +210,7 @@ pub fn main() -> Result<()> {
             extent.with_layers(ArrayCount::TWO),
             MipCount::ONE,
             // Enough space to store a non-normalized UV coordinate.
-            ColorFormat::Rg16Uint,
+            format::R16G16_UINT,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,

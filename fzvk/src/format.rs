@@ -39,10 +39,7 @@ impl Aspect for Stencil {
 }
 /// Implemented for all types which have a given aspect flag. For example,
 /// `R8_UNORM: HasAspect<Color>`
-pub unsafe trait HasAspect<A: Aspect> {}
-unsafe impl<Format: ColorFormat> HasAspect<Color> for Format {}
-unsafe impl<Format: DepthFormat> HasAspect<Depth> for Format {}
-unsafe impl<Format: StencilFormat> HasAspect<Stencil> for Format {}
+pub unsafe trait HasAspect<A: Aspect>: Format {}
 
 /// Implemented between two formats if the formats are defined to be
 /// [*compatible*](https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#formats-compatibility-classes).
@@ -64,7 +61,11 @@ unsafe impl<Format: StencilFormat> HasAspect<Stencil> for Format {}
 ///
 /// Each Depth/Stencil format is not compatible with any format other than
 /// itself.
-pub trait CompatibleWith<Other: Format> {}
+///
+/// Note that portability subset devices may have the further restriction that
+/// the number and bitsize of the channels must be the same, which is not
+/// reflected in this trait.
+pub trait CompatibleWith<Other: Format>: Format {}
 /// Implemented for pairs when their [compatibility
 /// classes](Format::CompatibilityClass) are identical. This is also implements
 /// the identity compatibility, `A: CompatibleWith<A>`
@@ -77,13 +78,6 @@ impl<A: Format, B: Format> CompatibleWith<B> for A where
 /// but this makes the error messages much more readable.
 trait IsSame<Other> {}
 impl<T> IsSame<T> for T {}
-
-/// Implemented for all formats which have a [`Color`] aspect.
-pub trait ColorFormat: Format {}
-/// Implemented for all formats which have a [`Depth`] aspect.
-pub trait DepthFormat: Format {}
-/// Implemented for all formats which have a [`Stencil`] aspect.
-pub trait StencilFormat: Format {}
 
 /// Defines many formats and their compatibility classes.
 /// ```ignore
@@ -129,7 +123,7 @@ macro_rules! color_nonblock_formats {
                     const BLOCK_DIMENSIONS : [u32; 3] = [1;3];
                     const BLOCK_SIZE : u32 = $size;
                 }
-                impl $crate::format::ColorFormat for $name {}
+                unsafe impl $crate::format::HasAspect<$crate::format::Color> for $name {}
             )*
         )*
     };

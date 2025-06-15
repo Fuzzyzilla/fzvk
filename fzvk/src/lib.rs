@@ -14,9 +14,9 @@
 //! of the data will not be totally dynamic.
 //!
 //! For example, an [`Image`] contains the following compile-time information:
-//! * Whether it is a Color or Depth/Stencil Aspect image.
 //! * Its dimensionality (1D, 2D, 3D)
 //! * Its array-ness
+//! * Its format and aspects.
 //! * Its vkImageUsageFlags
 //! * Whether multisampling is in use.
 //!
@@ -103,6 +103,7 @@
 //!
 //! Notable exclusions:
 //! * Currenlty only VK1.0 is supported, this will change in the future.
+//! * Cubemap imageviews
 //! * Compressed/block-based/multiplanar image formats.
 //! * Sparse objects.
 //!
@@ -892,7 +893,7 @@ impl<'device> Device<'device> {
     pub unsafe fn create_image<
         Usage: ImageUsage,
         Ext: Extent,
-        Format: ImageFormat,
+        Format: format::Format,
         Samples: ImageSamples,
     >(
         &self,
@@ -912,8 +913,8 @@ impl<'device> Device<'device> {
                     .queue_family_indices(sharing.family_slice())
                     .sharing_mode(sharing.mode())
                     .usage(Usage::FLAGS)
-                    .image_type(Ext::Dim::TYPE)
-                    .format(format.format())
+                    .image_type(Ext::Dim::IMAGE_TYPE)
+                    .format(Format::FORMAT)
                     .mip_levels(mip_levels.0.get())
                     .initial_layout(vk::ImageLayout::UNDEFINED)
                     .samples(samples.flag())
@@ -926,13 +927,75 @@ impl<'device> Device<'device> {
     pub unsafe fn destroy_image<
         Usage: ImageUsage,
         Dim: Dimensionality,
-        Format: ImageFormat,
+        Format: format::Format,
         Samples: ImageSamples,
     >(
         &self,
         image: Image<Usage, Dim, Format, Samples>,
     ) -> &Self {
         self.0.destroy_image(image.handle(), None);
+        self
+    }
+    /// See [`Self::create_image_view_mutable_format`] to utilize
+    /// `MUTABLE_FORMAT` image capabilities.
+    pub unsafe fn create_image_view_immutable_format<
+        Usage: ImageUsage,
+        Dim: Dimensionality,
+        Format: format::Format,
+        Samples: ImageSamples,
+    >(
+        &self,
+        image: &Image<Usage, Dim, Format, Samples>,
+        component_mapping: ComponentMapping,
+        subresource_range: (),
+    ) -> Result<ImageView<Usage, Dim, Format, Samples>, AllocationError> {
+        // Safety - Image and view statically forced to have same format.
+        self.create_image_view_mutable_format::<Usage, Dim, Format, Format, Samples>(
+            image,
+            component_mapping,
+            subresource_range,
+        )
+    }
+    /// Safety - If the `ImageFormat` and `ViewFormat` differ, the image must
+    /// have been created with the `MUTABLE_FORMAT` flag.
+    ///
+    /// See [`Self::create_image_view_immutable_format`] for a safer constrained
+    /// version.
+    pub unsafe fn create_image_view_mutable_format<
+        Usage: ImageUsage,
+        Dim: Dimensionality,
+        ImageFormat: format::Format,
+        ViewFormat: format::CompatibleWith<ImageFormat>,
+        Samples: ImageSamples,
+    >(
+        &self,
+        image: &Image<Usage, Dim, ImageFormat, Samples>,
+        component_mapping: ComponentMapping,
+        subresource_range: (),
+    ) -> Result<ImageView<Usage, Dim, ViewFormat, Samples>, AllocationError> {
+        self.0
+            .create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image.handle())
+                    .format(ViewFormat::FORMAT)
+                    .view_type(Dim::VIEW_TYPE)
+                    .subresource_range(todo!())
+                    .components(component_mapping.into()),
+                None,
+            )
+            .map(|handle| ThinHandle::from_handle_unchecked(handle))
+            .map_err(AllocationError::from_vk)
+    }
+    pub unsafe fn destroy_image_view<
+        Usage: ImageUsage,
+        Dim: Dimensionality,
+        Format: format::Format,
+        Samples: ImageSamples,
+    >(
+        &self,
+        view: ImageView<Usage, Dim, Format, Samples>,
+    ) -> &Self {
+        self.0.destroy_image_view(view.into_handle(), None);
         self
     }
     /// Create a pipeline cache, optionally populated with some data.
@@ -1273,13 +1336,14 @@ impl<'device> Device<'device> {
         MaybeInsideRender: CommandBufferState,
         SuperUsage: ImageSuperset<TransferDst>,
         Dim: Dimensionality,
+        Format: format::HasAspect<format::Color>,
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         buffer: impl AsRef<Buffer<TransferSrc>>,
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
-        image: &'_ Image<SuperUsage, Dim, ColorFormat, SingleSampled>,
+        image: &'_ Image<SuperUsage, Dim, Format, SingleSampled>,
         image_layout: vk::ImageLayout,
         regions: [BufferImageCopy<Dim>; N],
     ) -> &'a Self {
@@ -1297,7 +1361,9 @@ impl<'device> Device<'device> {
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
                 // FIXME: Aspect should be dynamic!
-                image_subresource: region.layers.subresource_layers(Aspect::Color),
+                image_subresource: region
+                    .layers
+                    .subresource_layers(vk::ImageAspectFlags::COLOR),
             }),
         );
         todo!()
@@ -1309,12 +1375,13 @@ impl<'device> Device<'device> {
         MaybeInsideRender: CommandBufferState,
         SuperUsage: ImageSuperset<TransferSrc>,
         Dim: Dimensionality,
+        Format: format::HasAspect<format::Color>,
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
-        image: &Image<SuperUsage, Dim, ColorFormat, SingleSampled>,
+        image: &Image<SuperUsage, Dim, Format, SingleSampled>,
         image_layout: vk::ImageLayout,
         buffer: impl AsRef<Buffer<TransferDst>>,
         regions: [BufferImageCopy<Dim>; N],
@@ -1333,7 +1400,9 @@ impl<'device> Device<'device> {
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
                 // FIXME: Aspect should be dynamic!
-                image_subresource: region.layers.subresource_layers(Aspect::Color),
+                image_subresource: region
+                    .layers
+                    .subresource_layers(vk::ImageAspectFlags::COLOR),
             }),
         );
         todo!()
@@ -1476,7 +1545,7 @@ unsafe fn waawa() {
             (TransferDst, TransferSrc),
             image_extent,
             MipCount::ONE,
-            ColorFormat::Rgba8Unorm,
+            format::R8G8B8A8_SRGB,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,

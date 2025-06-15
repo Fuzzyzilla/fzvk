@@ -11,15 +11,15 @@ locations where it is a common usage pattern that the "shape" of the data will
 not be totally dynamic.
 
 For example, an `Image` contains the following compile-time information:
-* Whether it is a Color or Depth/Stencil Aspect image.
 * Its dimensionality (1D, 2D, 3D)
 * Its array-ness
+* Its format and aspects.
 * Its vkImageUsageFlags
 * Whether multisampling is in use.
 
 As such, a fully-named image type looks something like:
 ```rust
-let image : Image<(Storage, TransferDst), D2Array, ColorFormat, SingleSampled> = todo!();
+let image : Image<(Storage, TransferDst), D2Array, R8G8B8_SRGB, SingleSampled> = todo!();
 ```
 Since each of these facts are almost always known at compile time and have large
 implications for valid usage of the resource, they are tracked at compile time
