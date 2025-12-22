@@ -1,5 +1,13 @@
 //! An example demonstrating compute pipelines by executing Rong Guodong's Jump
 //! Flood Algorithm for creating voronoi diagrams.
+//!
+//! Usage: `cargo run --example compute-jumpflood <in-path> <out-path>`
+//!
+//! The input and output formats are any image supported by the
+//! [`Image`](::image) crate. The output consists of RG16 pairs, describing the
+//! texel coordinates of the nearest bright pixel in the input image (**note**:
+//! the values in the output will be small, and might appear black until the
+//! levels are boosted in an external image editor).
 use std::num::NonZero;
 
 /// Don't let the compiler see that we're unconditionally panic'ing, as that
@@ -8,57 +16,174 @@ fn todo<T>() -> T {
     todo!()
 }
 
-/*mod vertex {
-    fzvk_shader::glsl! {
-        r"#version 460 core
-        #pragma shader_stage(compute)
-        layout(constant_id = 0) const int i = -4;
-        layout(constant_id = 1) const uint j = 1;
-        layout(constant_id = 2) const float k = 103.5;
-        layout(constant_id = 107) const bool owo = true;
-
-        layout(local_size_x_id = 3, local_size_y = 4, local_size_z_id = 4) in;
-
-        void main() {
-        }
-        "
-    }
-}*/
 mod import {
     fzvk_shader::glsl! {
-        r"#version 460 core
+        r#"#version 460 core
+        #extension GL_EXT_shader_explicit_arithmetic_types_int32: require
         #pragma shader_stage(compute)
         
         layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+        layout(set = 0, binding = 0, r8ui) uniform restrict readonly uimage2D reference;
+        layout(set = 1, binding = 0, rg16ui) uniform restrict writeonly uimage2D target;
+
+        const u32vec2 NOWHERE = u32vec2(65535u, 65535u);
+        const uint32_t OPAQUE_THRESHOLD = uint32_t(128u);
+
         void main() {
+            u32vec2 id = gl_GlobalInvocationID.xy;
+            // Early exit if out-of-bounds.
+            if (any(greaterThanEqual(id, imageSize(reference)))) { return; }
+
+            // Read the reference image.
+            uint32_t reference_value = uint32_t(imageLoad(reference, ivec2(id)).x);
+
+            // Compare and store. If opaque, the texel should refer to itself as
+            // the nearest opaque pixel. If not opaque, report the nearest as
+            // "unknown".
+            u32vec2 result = (reference_value > OPAQUE_THRESHOLD)
+                ? id
+                : NOWHERE;
+            imageStore(target, ivec2(id), u32vec4(result, 0, 0));
         }
-        "
+        "#
     }
 }
 mod pingpong {
     fzvk_shader::glsl! {
         r"#version 460 core
+        #extension GL_EXT_shader_explicit_arithmetic_types_int32: require
         #pragma shader_stage(compute)
-        
+
         layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+        layout(set = 0, binding = 0, rg16ui) uniform restrict readonly uimage2D reference;
+        layout(set = 1, binding = 0, rg16ui) uniform restrict writeonly uimage2D target;
+
+        layout(push_constant) uniform Push {
+            layout(offset = 0) uint32_t jump;
+        };
+
+        const u32vec2 NOWHERE = u32vec2(65535u, 65535u);
+        const uint32_t UINT32_MAX = ~0;
+
+        // For some reason integer dot product requires a device feature?!?
+        uint32_t u32Dot(u32vec2 a, u32vec2 b) {
+            return a.x * b.x + a.y * b.y;
+        }
+
+        uint32_t u16DistanceSq(u32vec2 a, u32vec2 b) {
+            u32vec2 min = min(a, b);
+            u32vec2 max = max(a, b);
+            // Widening to always fit the max result.
+            u32vec2 delta = u32vec2(max.x - min.x, max.y - min.y);
+            return u32Dot(delta, delta);
+        }
+
         void main() {
+            i32vec2 id = i32vec2(gl_GlobalInvocationID.xy);
+            i32vec2 imageSize = i32vec2(imageSize(reference));
+            // Early exit if out-of-bounds.
+            if (any(greaterThanEqual(id, imageSize))) { return; }
+
+            // Current closest point and it's distance.
+            u32vec2 thisCell = u32vec2(imageLoad(reference, id).rg);
+            uint32_t thisDistanceSq = (thisCell == NOWHERE)
+                ? UINT32_MAX
+                : u16DistanceSq(thisCell, u32vec2(id));
+
+            for (int x = -1; x <= 1; ++x) {
+                for (int y = -1; y <= 1; ++y) {
+                    i32vec2 pos = id + i32vec2(x, y) * int32_t(jump);
+                    // Skip cells outside of the image.
+                    if (any(lessThan(pos, i32vec2(0)))) continue;
+                    if (any(greaterThanEqual(pos, imageSize))) continue;
+
+                    // See what this other cell thinks is closest. If its closer
+                    // to us than our current one, adopt it!
+                    u32vec2 otherCell = u32vec2(imageLoad(reference, pos).rg);
+                    uint32_t otherDistanceSq = (otherCell == NOWHERE)
+                        ? UINT32_MAX
+                        : u16DistanceSq(otherCell, u32vec2(id));
+                    if (otherDistanceSq < thisDistanceSq) {
+                        thisCell = otherCell;
+                        thisDistanceSq = otherDistanceSq;
+                    }
+                }
+            }
+
+            // Store the new closest. (regardless of if we found any! So if not,
+            // it acts as a copy.)
+            imageStore(target, id, u32vec4(thisCell, 0, 0));
         }
         "
     }
+}
+
+// A terrible, no-good allocation strategy.
+unsafe fn allocate_naive(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    device: &ash::Device,
+    requirements: vk::MemoryRequirements,
+    host_accessable: bool,
+) -> Result<vk::DeviceMemory> {
+    // Choose the first type that fits requirements, regardless of heap.
+    let mut bits = requirements.memory_type_bits;
+    let index = memory_properties
+        .memory_types_as_slice()
+        .iter()
+        .enumerate()
+        .filter(|_| {
+            let pass = bits & 1 != 0;
+            bits >>= 1;
+            pass
+        })
+        .find(|(_, memory_properties)| {
+            const ACCEPTED: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::from_raw(
+                vk::MemoryPropertyFlags::DEVICE_LOCAL.as_raw()
+                    | vk::MemoryPropertyFlags::HOST_CACHED.as_raw()
+                    | vk::MemoryPropertyFlags::HOST_COHERENT.as_raw()
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE.as_raw(),
+            );
+            // If any unrecognized flags, must not allocate.
+            if memory_properties.property_flags.as_raw() & !ACCEPTED.as_raw() != 0 {
+                return false;
+            }
+            // If needs host accessible, bail if missing that flag.
+            if host_accessable
+                && !memory_properties
+                    .property_flags
+                    .intersects(vk::MemoryPropertyFlags::HOST_VISIBLE)
+            {
+                return false;
+            }
+            true
+        })
+        .ok_or_else(|| anyhow::anyhow!("Could not find suitable memory."))?
+        .0;
+    unsafe {
+        device.allocate_memory(
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(index as u32),
+            None,
+        )
+    }
+    .map_err(Into::into)
 }
 
 use anyhow::Result;
 use ash::vk;
 use fzvk::{format::Format, *};
 pub fn main() -> Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: <in-path.png>"))?;
-    let image =
-        png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?)).read_info()?;
-    if image.info().width > u32::from(u16::MAX) || image.info().height > u32::from(u16::MAX) {
+    let [in_path, out_path] = {
+        let mut args = std::env::args().skip(1);
+        args.next()
+            .and_then(|in_path| Some([in_path, args.next()?]))
+    }
+    .ok_or_else(|| anyhow::anyhow!("usage: <in-path> <out-path.rg16u>"))?;
+    let image = ::image::open(in_path)?.to_luma8();
+    if image.width() > u32::from(u16::MAX) || image.height() > u32::from(u16::MAX) {
         anyhow::bail!("image dimensions too large.")
     }
     // =========================================================================================
@@ -101,7 +226,7 @@ pub fn main() -> Result<()> {
             // Check it has all the features we need:
             .filter(|&&phys| {
                 let r8unorm = instance
-                    .get_physical_device_format_properties(phys, format::R8_UNORM::FORMAT)
+                    .get_physical_device_format_properties(phys, format::R8_UINT::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE);
@@ -163,20 +288,19 @@ pub fn main() -> Result<()> {
     // =========================================================================================
     // Import image, and take only its Alpha channel.
     let extent = Extent2D {
-        width: image.info().width.try_into()?,
-        height: image.info().height.try_into()?,
+        width: image.width().try_into()?,
+        height: image.height().try_into()?,
     };
-    // Number of bytes for the whole image, A8 format is 1byte per texel.
-    #[allow(clippy::identity_op)]
-    let size_bytes =
-        NonZero::new(u64::from(extent.width.get()) * u64::from(extent.height.get()) * 1).unwrap();
+    // Number of bytes for the final image, RGU16 is 4 bytes per texel.
+    let output_size_bytes =
+        NonZero::new(u64::from(extent.width.get()) * u64::from(extent.height.get()) * 4).unwrap();
 
     unsafe {
         // =========================================================================================
         // Create buffer + images objects and appropriate backing memory. We
-        // will need: One host buffer, one R8Unorm format image to reference,
-        // two RG16Uint format images to "pingpong" between. Our operation will
-        // look like:
+        // will need: One host buffer, one R8Uint format image to reference, two
+        // RG16Uint format images to "pingpong" between. Our operation will look
+        // like:
 
         // Host buffer --xfer--> color
 
@@ -189,7 +313,7 @@ pub fn main() -> Result<()> {
         let buffer = device.create_buffer(
             // Source for original image, dst for output image
             (TransferSrc, TransferDst),
-            size_bytes,
+            output_size_bytes,
             SharingMode::Exclusive,
         )?;
         let reference_image = device.create_image(
@@ -197,7 +321,7 @@ pub fn main() -> Result<()> {
             (TransferDst, Storage),
             extent,
             MipCount::ONE,
-            format::R8_UNORM,
+            format::R8_UINT,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
@@ -218,16 +342,171 @@ pub fn main() -> Result<()> {
 
         // =========================================================================================
         // Allocate memory for the buffers and images.
-        let memory_info = instance.get_physical_device_memory_properties(phys_device);
+        let memory_properties = instance.get_physical_device_memory_properties(phys_device);
         // See which memory types we're compatible with.
-        let buffer_requirements = ash_device.get_buffer_memory_requirements(buffer.handle());
-        let reference_image_requirements =
-            ash_device.get_image_memory_requirements(reference_image.handle());
-        let pingpong_array_requirements =
-            ash_device.get_image_memory_requirements(pingpong_array.handle());
-        let bits = buffer_requirements.memory_type_bits
-            & reference_image_requirements.memory_type_bits
-            & pingpong_array_requirements.memory_type_bits;
+        let ash_buffer_memory = allocate_naive(
+            &memory_properties,
+            &ash_device,
+            ash_device.get_buffer_memory_requirements(buffer.handle()),
+            true,
+        )?;
+        let ash_reference_memory = allocate_naive(
+            &memory_properties,
+            &ash_device,
+            ash_device.get_image_memory_requirements(reference_image.handle()),
+            false,
+        )?;
+        let ash_pingpong_memory = allocate_naive(
+            &memory_properties,
+            &ash_device,
+            ash_device.get_image_memory_requirements(pingpong_array.handle()),
+            false,
+        )?;
+        ash_device.bind_buffer_memory(buffer.handle(), ash_buffer_memory, 0)?;
+        ash_device.bind_image_memory(reference_image.handle(), ash_reference_memory, 0)?;
+        ash_device.bind_image_memory(pingpong_array.handle(), ash_pingpong_memory, 0)?;
+        let buffer = buffer.assume_backed();
+        let reference_image = reference_image.assume_backed();
+        let pingpong_array = pingpong_array.assume_backed();
+
+        let buffer_mapping = ash_device.map_memory(
+            ash_buffer_memory,
+            0,
+            output_size_bytes.get(),
+            vk::MemoryMapFlags::empty(),
+        )?;
+
+        let buffer_map_range = vk::MappedMemoryRange::default()
+            .memory(ash_buffer_memory)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        let buffer_mapping = core::slice::from_raw_parts_mut(
+            buffer_mapping.cast::<u8>(),
+            output_size_bytes.get() as usize,
+        );
+        buffer_mapping[..image.len()].copy_from_slice(&image);
+        // Make the written values visible to the device.
+        ash_device.flush_mapped_memory_ranges(&[buffer_map_range])?;
+
+        let reference_image_view = device.create_image_view_immutable_format(
+            &reference_image,
+            ComponentMapping::IDENTITY,
+            (),
+        )?;
+        let pingpong_views = [
+            ash_device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .components(vk::ComponentMapping::default())
+                    .format(vk::Format::R16G16_UINT)
+                    .image(pingpong_array.handle())
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )?,
+            ash_device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .components(vk::ComponentMapping::default())
+                    .format(vk::Format::R16G16_UINT)
+                    .image(pingpong_array.handle())
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 1,
+                        layer_count: 1,
+                    }),
+                None,
+            )?,
+        ];
+
+        let ash_descriptor_set_layout = ash_device
+            .create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default()
+                    .bindings(&[vk::DescriptorSetLayoutBinding::default()
+                        .binding(0)
+                        .descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)])
+                    .flags(vk::DescriptorSetLayoutCreateFlags::empty()),
+                None,
+            )
+            .unwrap();
+        let ash_pipeline_layout = ash_device
+            .create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .push_constant_ranges(&[vk::PushConstantRange::default()
+                        .size(4)
+                        .offset(0)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)])
+                    // Uses two sets of the same layout
+                    .set_layouts(&[ash_descriptor_set_layout, ash_descriptor_set_layout])
+                    .flags(vk::PipelineLayoutCreateFlags::empty()),
+                None,
+            )
+            .unwrap();
+        let ash_descriptor_pool = ash_device
+            .create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .flags(vk::DescriptorPoolCreateFlags::empty())
+                    .max_sets(3)
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::STORAGE_IMAGE)
+                        .descriptor_count(3)]),
+                None,
+            )
+            .unwrap();
+
+        let (ash_reference_descriptor_set, ash_pingpong_descriptor_sets) = {
+            let ash_descriptor_sets = ash_device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(ash_descriptor_pool)
+                        .set_layouts(&[
+                            ash_descriptor_set_layout,
+                            ash_descriptor_set_layout,
+                            ash_descriptor_set_layout,
+                        ]),
+                )
+                .unwrap();
+
+            (
+                ash_descriptor_sets[0],
+                *ash_descriptor_sets[1..].as_array::<2>().unwrap(),
+            )
+        };
+        ash_device.update_descriptor_sets(
+            &[
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ash_reference_descriptor_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&[vk::DescriptorImageInfo::default()
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .image_view(reference_image_view.handle())]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ash_pingpong_descriptor_sets[0])
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&[vk::DescriptorImageInfo::default()
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .image_view(pingpong_views[0])]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ash_pingpong_descriptor_sets[1])
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&[vk::DescriptorImageInfo::default()
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .image_view(pingpong_views[1])]),
+            ],
+            &[],
+        );
 
         // =========================================================================================
         // Create the compute pipeline that will do the work Shader that takes
@@ -238,17 +517,16 @@ pub fn main() -> Result<()> {
         // Shader that iteratively refines between the two pingpong images.
         let pingpong_module = device.create_module::<pingpong::Module>()?;
         let pingpong_shader = pingpong_module.entry(pingpong::MAIN).specialize(&());
-        let empty_layout = device.create_pipeline_layout::<()>()?;
 
         let [import_pipe, pingpong_pipe] = device.create_compute_pipelines(
             None,
             [
                 ComputePipelineCreateInfo {
-                    layout: &empty_layout.handle(),
+                    layout: &ash_pipeline_layout,
                     shader: import_shader,
                 },
                 ComputePipelineCreateInfo {
-                    layout: &empty_layout.handle(),
+                    layout: &ash_pipeline_layout,
                     shader: pingpong_shader,
                 },
             ],
@@ -285,8 +563,11 @@ pub fn main() -> Result<()> {
             // Transition the images from Undefined -> The formats we need.
             .barrier(
                 &mut recording,
-                // We aren't waiting on any previous operations.
-                barrier::MemoryCondition::None,
+                // Waiting on the host to write to the buffer.
+                barrier::MemoryCondition::StageAccess(barrier::StageAccess::from_stage_access(
+                    barrier::PipelineStages::HOST,
+                    barrier::WriteAccess::HOST_WRITE,
+                )),
                 // Block transfer from occuring until the image is in the right
                 // layout to accept it.
                 barrier::StageAccess::from_stage_access(
@@ -294,9 +575,14 @@ pub fn main() -> Result<()> {
                     barrier::ReadWriteAccess::TRANSFER_WRITE,
                 )
                 .into(),
-                // TODO: transition images.
-                // reference -> transfer dst opt
-                // pingpong -> storage opt
+                [buffer.barrier()],
+                [
+                    reference_image.transition(
+                        vk::ImageLayout::UNDEFINED,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    ),
+                    pingpong_array.transition(vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL),
+                ],
             )
             // Copy the image from host memory
             .copy_buffer_to_image(
@@ -322,18 +608,49 @@ pub fn main() -> Result<()> {
                 )
                 .into(),
                 block_compute_read_write.into(),
-                // Todo: Transition
-                // reference -> storage opt
-            )
-            // TODO: bind import pipe TODO: bind descriptors of images
+                [],
+                [reference_image.transition(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::GENERAL,
+                )],
+            );
+        ash_device.cmd_bind_pipeline(
+            recording.handle(),
+            vk::PipelineBindPoint::COMPUTE,
+            import_pipe.handle(),
+        );
+        ash_device.cmd_push_constants(
+            recording.handle(),
+            ash_pipeline_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &0u32.to_ne_bytes(),
+        );
+        ash_device.cmd_bind_descriptor_sets(
+            recording.handle(),
+            vk::PipelineBindPoint::COMPUTE,
+            ash_pipeline_layout,
+            0,
+            &[
+                ash_reference_descriptor_set,
+                ash_pingpong_descriptor_sets[0],
+            ],
+            &[],
+        );
+        device
             // Run a shader to initialize our first pingpong buffer with the
             // reference image
             .dispatch(
                 &mut recording,
                 [extent.width, extent.height, NonZero::<u32>::MIN],
             );
-        // TODO: bind pingpong pipe
-        let mut readbuf = 0u32;
+        ash_device.cmd_bind_pipeline(
+            recording.handle(),
+            vk::PipelineBindPoint::COMPUTE,
+            pingpong_pipe.handle(),
+        );
+
+        let mut readbuf = 0;
 
         // Generate [1, X/2, X/4, X/8, ..., 1]
         let mut spread = extent.width.max(extent.height).get() / 2;
@@ -348,16 +665,35 @@ pub fn main() -> Result<()> {
         }));
         // Iterate the algorithm. This for-loop is where the bulk of the work
         // takes place, funny that it's the shortest part!
-        for _spread in spread_iter {
+        for spread in spread_iter {
+            ash_device.cmd_bind_descriptor_sets(
+                recording.handle(),
+                vk::PipelineBindPoint::COMPUTE,
+                ash_pipeline_layout,
+                0,
+                &[
+                    ash_pingpong_descriptor_sets[readbuf],
+                    ash_pingpong_descriptor_sets[if readbuf == 0 { 1 } else { 0 }],
+                ],
+                &[],
+            );
+            ash_device.cmd_push_constants(
+                recording.handle(),
+                ash_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &spread.to_ne_bytes(),
+            );
+
             device
-                // TODO: swap buffers
-                // TODO: push constants
                 // Wait until previous shader is done before executing the
                 // next...
                 .barrier(
                     &mut recording,
                     wait_compute_write.into(),
                     block_compute_read_write.into(),
+                    [],
+                    [],
                 )
                 .dispatch(
                     &mut recording,
@@ -367,52 +703,118 @@ pub fn main() -> Result<()> {
             readbuf = if readbuf == 0 { 1 } else { 0 };
         }
         // Export the final image back to the host buffer
-        device
-            .barrier(
-                &mut recording,
-                wait_compute_write.into(),
-                barrier::StageAccess::from_stage_access(
-                    barrier::PipelineStages::TRANSFER,
-                    barrier::ReadWriteAccess::TRANSFER_READ,
-                )
-                .into(),
-                // TODO: Transition `pingpong[readbuf]` to TRANSFER_SRC
+        device.barrier(
+            &mut recording,
+            wait_compute_write.into(),
+            barrier::StageAccess::from_stage_access(
+                barrier::PipelineStages::TRANSFER,
+                barrier::ReadWriteAccess::TRANSFER_READ,
             )
-            // It's safe to write to the buffer after the read at the start, due
-            // to the transfer -> compute shader -> transfer dependency chain.
-            .copy_image_to_buffer(
-                &mut recording,
-                &pingpong_array,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                &buffer,
-                [BufferImageCopy {
-                    buffer_offset: 0,
-                    image_offset: Offset::ORIGIN,
-                    image_extent: todo(), // wrongly expects a Layers >= 2 .
-                    pitch: BufferPitch::PACKED,
-                    layers: SubresourceMipArray::new(0, 0..1),
-                }],
-            )
-            .end_command_buffer(recording)?;
+            .into(),
+            [],
+            [
+                // FIXME: we only actually need to transition
+                // pingpong_array[readbuf].
+                pingpong_array.transition(
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+            ],
+        );
+        // It's safe to write to the buffer after the read at the start, due to
+        // the transfer -> compute shader -> transfer dependency chain.
+        /*.copy_image_to_buffer(
+            &mut recording,
+            &pingpong_array,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            &buffer,
+            [BufferImageCopy {
+                buffer_offset: 0,
+                image_offset: Offset::ORIGIN,
+                image_extent: todo(), // wrongly expects a Layers >= 2 .
+                pitch: BufferPitch::PACKED,
+                layers: SubresourceMipArray::new(0, 0..1),
+            }],
+        );*/
+        ash_device.cmd_copy_image_to_buffer(
+            recording.handle(),
+            pingpong_array.handle(),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            buffer.handle(),
+            &[vk::BufferImageCopy {
+                buffer_offset: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_array_layer: readbuf as u32,
+                    layer_count: 1,
+                    mip_level: 0,
+                },
+                image_extent: vk::Extent3D {
+                    width: extent.width.get(),
+                    height: extent.height.get(),
+                    depth: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                ..Default::default()
+            }],
+        );
+
+        device.end_command_buffer(recording)?;
 
         // =========================================================================================
         // Execute!
         let fence = device.create_fence::<Unsignaled>()?.into_inner();
-        let SubmitWithFence { pending_fence, .. } =
-            device.submit_with_fence(&mut queue, [], &[command_buffer.reference()], [], fence)?;
+        let SubmitWithFence {
+            pending_fence,
+            signaled_semaphores: [],
+            waited_semaphores: [],
+        } = device.submit_with_fence(&mut queue, [], &[command_buffer.reference()], [], fence)?;
         let fence = device.wait_fence(pending_fence)?;
+
+        // =========================================================================================
         // We can now read the buffer's memory to get our output result! A fence
         // signal operation creates an everything-to-everything memory
-        // dependency, so there is no need for a final barrier for transfer
-        // write -> host read.
+        // dependency, and flushes all *device* caches, so there is no need for
+        // a final barrier for transfer write -> host read. There *does* still
+        // need to be a host cache invalidation!
+        ash_device.invalidate_mapped_memory_ranges(&[buffer_map_range])?;
+
+        // Export UV image as RGB16U. We have to make a copy to shove the zeroed
+        // B channel in, because no image format supports RG format and LA has
+        // quirks! Silly!
+        let image_data = bytemuck::cast_slice::<u8, [u16; 2]>(buffer_mapping)
+            .iter()
+            .flat_map(|&[r, g]| [r, g, 0u16])
+            .collect::<Vec<u16>>();
+        if let Err(err) = ::image::save_buffer(
+            out_path,
+            bytemuck::cast_slice(&image_data),
+            extent.width.get(),
+            extent.height.get(),
+            ::image::ColorType::Rgb16,
+        ) {
+            eprintln!("Failed to export image: {err}");
+        };
 
         // =========================================================================================
         // Cleanup
+        ash_device.destroy_pipeline_layout(ash_pipeline_layout, None);
+        ash_device.destroy_descriptor_pool(ash_descriptor_pool, None);
+        ash_device.destroy_descriptor_set_layout(ash_descriptor_set_layout, None);
+
+        ash_device.free_memory(ash_buffer_memory, None);
+        ash_device.free_memory(ash_reference_memory, None);
+        ash_device.free_memory(ash_pingpong_memory, None);
+
+        let [pingpong_view_0, pingpong_view_1] = pingpong_views;
+        ash_device.destroy_image_view(pingpong_view_0, None);
+        ash_device.destroy_image_view(pingpong_view_1, None);
         device
             .destroy_fence(fence)
             .destroy_command_pool(command_pool)
             .destroy_pipeline(pingpong_pipe)
             .destroy_pipeline(import_pipe)
+            .destroy_image_view(reference_image_view)
             .destroy_image(pingpong_array)
             .destroy_image(reference_image)
             .destroy_buffer(buffer);
@@ -420,9 +822,6 @@ pub fn main() -> Result<()> {
         ash_device.destroy_device(None);
         instance.destroy_instance(None);
     }
-
-    // =========================================================================================
-    // Export UV image as RGB16.
 
     Ok(())
 }

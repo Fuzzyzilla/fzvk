@@ -1,0 +1,67 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'fzvk'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=fzvk"
+                ],
+                "filter": {
+                    "name": "fzvk",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'compute-jumpflood'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=compute-jumpflood",
+                    "--package=fzvk"
+                ],
+                "filter": {
+                    "name": "compute-jumpflood",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "env": {
+                "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'compute-jumpflood'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=compute-jumpflood",
+                    "--package=fzvk"
+                ],
+                "filter": {
+                    "name": "compute-jumpflood",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

@@ -16,10 +16,11 @@ alloc = []
 [dev-dependencies]
 # A way to output images. (For simplicity, most examples will forego a full
 # swapchain implementation)
-png = "0.17.16"
+image = "0.25.9"
 # Link to loader for examples (linking is good for programs which cannot exist
 # without vk)
 ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
 # Convinient error reporting for non-libraries.
 anyhow = "1.0.98"
 fzvk-shader = { workspace = true }
+bytemuck = "1.24.0"

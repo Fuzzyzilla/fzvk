@@ -80,6 +80,20 @@ impl<AcUsageess: BufferUsage> Buffer<AcUsageess> {
         // Safety: Forwarded to caller.
         unsafe { self.with_state() }
     }
+    pub fn barrier(&'_ self) -> BufferBarrier<'_> {
+        BufferBarrier {
+            buffer: unsafe { self.handle() },
+            offset: 0,
+            len: vk::WHOLE_SIZE,
+            _phantom: PhantomData,
+        }
+    }
+}
+pub struct BufferBarrier<'a> {
+    pub(crate) buffer: vk::Buffer,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    _phantom: PhantomData<&'a ()>,
 }
 /// A thin, shared reference to a [`Buffer`] with some subset of usages.
 /// Acquired using [`Buffer::reference`].

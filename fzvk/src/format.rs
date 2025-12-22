@@ -1,6 +1,7 @@
 use super::vk;
 /// A vulkan vertex or texel format.
 pub unsafe trait Format {
+    type Aspect: Aspect;
     /// An opaque type representing the compatibility of this format. Images
     /// views with different formats of the same compatibility can safely alias
     /// each other.
@@ -117,6 +118,7 @@ macro_rules! color_nonblock_formats {
                 $(#[$format_meta])*
                 pub struct $name;
                 unsafe impl $crate::format::Format for $name {
+                    type Aspect = Color;
                     type CompatibilityClass = $class;
                     const FORMAT : ::ash::vk::Format = $format;
                     const TEXEL_SIZE : u32 = $size;

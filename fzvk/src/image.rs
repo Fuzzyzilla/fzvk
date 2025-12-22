@@ -1,5 +1,6 @@
 //! `vkImage[View]`
 use crate::{
+    ThinHandle,
     buffer::{BufferPitch, RowPitch, RowSlicePitch},
     format,
     usage::ImageUsage,
@@ -64,8 +65,8 @@ pub trait Offset {
     /// The dimensionality of the extent represented by this type. For example,
     /// 2D Array has dimensionality 2.
     type Dim: Dimensionality;
-    /// The extrapolated extent3D. All dimensions must be non-zero. Axes beyond
-    /// the type's dimensionality should be `1`.
+    /// The extrapolated Offset3D. Axes beyond the type's dimensionality should
+    /// be `0`.
     fn offset(&self) -> vk::Offset3D;
 }
 pub struct Offset1D(pub i32);
@@ -442,6 +443,37 @@ crate::thin_handle! {
     pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
         vk::Image
     );
+}
+pub struct Transition<'a> {
+    pub(crate) from: vk::ImageLayout,
+    pub(crate) to: vk::ImageLayout,
+    pub(crate) image: vk::Image,
+    pub(crate) subresource_range: vk::ImageSubresourceRange,
+    _phantom: core::marker::PhantomData<&'a ()>,
+}
+impl<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>
+    Image<Usage, Dim, Format, Samples>
+{
+    #[must_use = "must be submitted to a `barrier` command to have any effect."]
+    pub unsafe fn transition(
+        &'_ self,
+        from: vk::ImageLayout,
+        to: vk::ImageLayout,
+    ) -> Transition<'_> {
+        Transition {
+            from,
+            to,
+            image: unsafe { self.handle() },
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            },
+            _phantom: core::marker::PhantomData,
+        }
+    }
 }
 
 crate::thin_handle! {

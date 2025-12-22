@@ -1,7 +1,7 @@
 //! `vk*UsageFlags`.
 use super::{Pred, Satisified, vk};
 
-macro_rules! access_combinations {
+macro_rules! flag_combinations {
     {impl $trait_name:ident for [$(($($name:ident),*$(,)?)),+$(,)?] {
         const $const_name:ident: $const_ty:ty;
     }} => {
@@ -68,7 +68,7 @@ impl BufferUsage for Uniform {
 impl<A: BufferUsage> BufferUsage for (A,) {
     const FLAGS: vk::BufferUsageFlags = A::FLAGS;
 }
-access_combinations! {
+flag_combinations! {
     impl BufferUsage for [
         (A,B),
         (A,B,C),
@@ -80,7 +80,6 @@ access_combinations! {
         const FLAGS : vk::BufferUsageFlags;
     }
 }
-
 /// Compile-time representation of `vkImageUsageFlags`.
 ///
 /// Flags can be a single usage, [`Storage`], or can be placed in a tuple to
@@ -131,7 +130,7 @@ impl ImageUsage for InputAttachment {
 impl<A: ImageUsage> ImageUsage for (A,) {
     const FLAGS: vk::ImageUsageFlags = A::FLAGS;
 }
-access_combinations! {
+flag_combinations! {
     impl ImageUsage for [
         (A,B),
         (A,B,C),

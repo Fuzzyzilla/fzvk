@@ -168,6 +168,7 @@ pub mod handle;
 pub use handle::*;
 pub mod image;
 pub use image::*;
+pub mod memory;
 pub mod pipeline;
 pub use pipeline::*;
 pub mod usage;
@@ -301,6 +302,38 @@ mod macro_use {
             )*
         };
     }
+    /// Implement a flags trait for tuples of single flags, where the tuple
+    /// implements the OR of the flags.
+    /// ```ignore
+    /// #[cfg_attr(doc, doc(fake_variadic))]
+    /// impl<A: BufferUsage> BufferUsage for (A,) {
+    ///     const FLAGS: vk::BufferUsageFlags = A::FLAGS;
+    /// }
+    /// flag_combinations! {
+    ///    impl BufferUsage for [
+    ///        (A,B),
+    ///        (A,B,C),
+    ///    ] {
+    ///        const FLAGS : vk::BufferUsageFlags;
+    ///    }
+    /// }
+    /// ```
+    #[macro_export]
+    macro_rules! flag_combinations {
+        {impl $trait_name:ident for [$(($($name:ident),*$(,)?)),+$(,)?] {
+            const $const_name:ident: $const_ty:ty;
+        }} => {
+            // Trailing comma to force it to be a tuple type, even for single
+            // fields.
+            $(
+                // Hide, as we use a fake variadic when generating docs.
+                #[doc(hidden)]
+                impl<$($name : $trait_name),+> $trait_name for ($($name),*,) {
+                    const $const_name: $const_ty = <$const_ty>::from_raw($(<$name as $trait_name>::$const_name.as_raw())|*);
+                }
+            )+
+        };
+    }
 }
 
 pub struct Pred<const B: bool>;
@@ -421,35 +454,6 @@ impl<'a, State: KnownFenceState> Bound<'a, Fence<State>> {
         }
     }
 }
-typestate_enum! {
-    /// Typestates for host-visibility of memory.
-    ///
-    /// Device-locality is not expressed on a typestate level as it has no
-    /// implications for correct usage.
-    pub enum trait MemoryAccess {
-        /// Typestate for memory which is host-visible and coherent.
-        ///
-        /// Coherent memory does not need explicit flushing or invalidation.
-        pub struct HostCoherent,
-        /// Typestate for memory which is host-visible and cached.
-        ///
-        /// Cached accesses are generally faster than uncached accesses, though
-        /// they are not always [coherent](HostCoherent).
-        pub struct HostCached,
-        /// Typestate for memory which is host visible and both
-        /// [cached](HostCached) and [coherent](HostCoherent).
-        pub struct HostCachedCoherent,
-        /// Typestate for memory which is not host-visible.
-        pub struct Inaccessable,
-    }
-}
-thin_handle!(
-    /// An allocation of continuous memory, accessible by the device.
-    ///
-    /// # Typestates
-    /// * [`Access`](MemoryAccess): Whether the memory is host-visible.
-    pub struct Memory<Access: MemoryAccess>(vk::DeviceMemory);
-);
 
 #[must_use = "the handles contained will be leaked"]
 pub struct SubmitWithFence<const WAITS: usize, const SIGNALS: usize> {
@@ -839,7 +843,7 @@ impl<'device> Device<'device> {
         _usage: Usage,
         size: NonZero<u64>,
         sharing: SharingMode,
-    ) -> Result<Buffer<Usage>, AllocationError> {
+    ) -> Result<memory::Virtual<Buffer<Usage>>, AllocationError> {
         self.0
             .create_buffer(
                 &vk::BufferCreateInfo::default()
@@ -849,10 +853,10 @@ impl<'device> Device<'device> {
                     .queue_family_indices(sharing.family_slice()),
                 None,
             )
-            .map(|handle| Buffer::from_handle_unchecked(handle))
+            .map(|handle| memory::Virtual::from_handle_unchecked(handle))
             .map_err(AllocationError::from_vk)
     }
-    pub unsafe fn destroy_buffer<Usage: BufferUsage>(&self, buffer: Buffer<Usage>) -> &Self {
+    pub unsafe fn destroy_buffer(&self, buffer: impl ThinHandle<Handle = vk::Buffer>) -> &Self {
         self.0.destroy_buffer(buffer.handle(), None);
         self
     }
@@ -904,7 +908,7 @@ impl<'device> Device<'device> {
         samples: Samples,
         tiling: vk::ImageTiling,
         sharing: SharingMode,
-    ) -> Result<Image<Usage, Ext::Dim, Format, Samples>, AllocationError> {
+    ) -> Result<memory::Virtual<Image<Usage, Ext::Dim, Format, Samples>>, AllocationError> {
         self.0
             .create_image(
                 &vk::ImageCreateInfo::default()
@@ -921,19 +925,11 @@ impl<'device> Device<'device> {
                     .tiling(tiling),
                 None,
             )
-            .map(|handle| Image::from_handle_unchecked(handle))
+            .map(|handle| memory::Virtual::from_handle_unchecked(handle))
             .map_err(AllocationError::from_vk)
     }
-    pub unsafe fn destroy_image<
-        Usage: ImageUsage,
-        Dim: Dimensionality,
-        Format: format::Format,
-        Samples: ImageSamples,
-    >(
-        &self,
-        image: Image<Usage, Dim, Format, Samples>,
-    ) -> &Self {
-        self.0.destroy_image(image.handle(), None);
+    pub unsafe fn destroy_image(&self, image: impl ThinHandle<Handle = vk::Image>) -> &Self {
+        self.0.destroy_image(image.into_handle(), None);
         self
     }
     /// See [`Self::create_image_view_mutable_format`] to utilize
@@ -979,7 +975,13 @@ impl<'device> Device<'device> {
                     .image(image.handle())
                     .format(ViewFormat::FORMAT)
                     .view_type(Dim::VIEW_TYPE)
-                    .subresource_range(todo!())
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: <ImageFormat::Aspect as format::Aspect>::ASPECT,
+                        base_mip_level: 0,
+                        level_count: vk::REMAINING_MIP_LEVELS,
+                        base_array_layer: 0,
+                        layer_count: vk::REMAINING_ARRAY_LAYERS,
+                    })
                     .components(component_mapping.into()),
                 None,
             )
@@ -1299,11 +1301,18 @@ impl<'device> Device<'device> {
             .map_err(AllocationError::from_vk)?;
         Ok(self)
     }
-    pub unsafe fn barrier<'a, Level: CommandBufferLevel>(
+    pub unsafe fn barrier<
+        'a,
+        const BUFFER_BARRIERS: usize,
+        const IMAGE_BARRIERS: usize,
+        Level: CommandBufferLevel,
+    >(
         &'a self,
         buffer: &'_ mut RecordingBuffer<Level, OutsideRender>,
         wait_for: barrier::MemoryCondition,
         block: barrier::MemoryBlock,
+        buffer_barriers: [BufferBarrier<'_>; BUFFER_BARRIERS],
+        image_transitions: [image::Transition<'_>; IMAGE_BARRIERS],
     ) -> &'a Self {
         let (src_stage, src_access) = wait_for.into_stage_access();
         let (dst_stage, dst_access) = block.into_stage_access();
@@ -1315,8 +1324,29 @@ impl<'device> Device<'device> {
             &[vk::MemoryBarrier::default()
                 .src_access_mask(src_access)
                 .dst_access_mask(dst_access)],
-            &[],
-            &[],
+            &buffer_barriers.map(|barrier| {
+                vk::BufferMemoryBarrier::default()
+                    .buffer(barrier.buffer)
+                    .offset(barrier.offset)
+                    .size(barrier.len)
+                    .src_access_mask(src_access)
+                    .dst_access_mask(dst_access)
+                    // Defines a "none" ownership transfer.
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            }),
+            &image_transitions.map(|transition| {
+                vk::ImageMemoryBarrier::default()
+                    .image(transition.image)
+                    .old_layout(transition.from)
+                    .new_layout(transition.to)
+                    .subresource_range(transition.subresource_range)
+                    .src_access_mask(src_access)
+                    .dst_access_mask(dst_access)
+                    // Defines a "none" ownership transfer.
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            }),
         );
         self
     }
@@ -1366,7 +1396,8 @@ impl<'device> Device<'device> {
                     .subresource_layers(vk::ImageAspectFlags::COLOR),
             }),
         );
-        todo!()
+        //todo!();
+        self
     }
     pub unsafe fn copy_image_to_buffer<
         'a,
@@ -1539,7 +1570,9 @@ unsafe fn waawa() {
             .unwrap(),
             SharingMode::Exclusive,
         )
-        .unwrap();
+        .unwrap()
+        // Todo:
+        .assume_backed();
     let image = device
         .create_image(
             (TransferDst, TransferSrc),
@@ -1550,7 +1583,9 @@ unsafe fn waawa() {
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
         )
-        .unwrap();
+        .unwrap()
+        // Todo:
+        .assume_backed();
     let renderpass = device.create_render_pass(&[todo(), todo()]).unwrap();
     let [mut cb1, cb2] = device.allocate_command_buffers(&mut pool, Primary).unwrap();
 
