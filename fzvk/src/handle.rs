@@ -115,7 +115,6 @@ pub unsafe trait ThinHandle: Sized {
             core::mem::size_of::<Self>(),
             core::mem::size_of::<Self::Handle>()
         );
-        debug_assert!(!handle.is_null());
         Some(unsafe { (&raw const handle).cast::<Self>().read() })
     }
     /// Change the typestate of the thin handle. This is a jackhammer to drive a

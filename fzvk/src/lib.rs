@@ -163,6 +163,7 @@ pub mod buffer;
 pub use buffer::*;
 pub mod command_buffer;
 pub use command_buffer::*;
+pub mod descriptor;
 pub mod format;
 pub mod handle;
 pub use handle::*;

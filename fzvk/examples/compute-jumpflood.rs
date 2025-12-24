@@ -68,16 +68,16 @@ mod pingpong {
         const uint32_t UINT32_MAX = ~0;
 
         // For some reason integer dot product requires a device feature?!?
-        uint32_t u32Dot(u32vec2 a, u32vec2 b) {
+        uint32_t dotU32(in u32vec2 a, in u32vec2 b) {
             return a.x * b.x + a.y * b.y;
         }
 
-        uint32_t u16DistanceSq(u32vec2 a, u32vec2 b) {
+        uint32_t distanceSq(in u32vec2 a, in u32vec2 b) {
             u32vec2 min = min(a, b);
             u32vec2 max = max(a, b);
             // Widening to always fit the max result.
             u32vec2 delta = u32vec2(max.x - min.x, max.y - min.y);
-            return u32Dot(delta, delta);
+            return dotU32(delta, delta);
         }
 
         void main() {
@@ -90,7 +90,7 @@ mod pingpong {
             u32vec2 thisCell = u32vec2(imageLoad(reference, id).rg);
             uint32_t thisDistanceSq = (thisCell == NOWHERE)
                 ? UINT32_MAX
-                : u16DistanceSq(thisCell, u32vec2(id));
+                : distanceSq(thisCell, u32vec2(id));
 
             for (int x = -1; x <= 1; ++x) {
                 for (int y = -1; y <= 1; ++y) {
@@ -104,7 +104,7 @@ mod pingpong {
                     u32vec2 otherCell = u32vec2(imageLoad(reference, pos).rg);
                     uint32_t otherDistanceSq = (otherCell == NOWHERE)
                         ? UINT32_MAX
-                        : u16DistanceSq(otherCell, u32vec2(id));
+                        : distanceSq(otherCell, u32vec2(id));
                     if (otherDistanceSq < thisDistanceSq) {
                         thisCell = otherCell;
                         thisDistanceSq = otherDistanceSq;

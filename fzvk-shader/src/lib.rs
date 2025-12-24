@@ -1,9 +1,10 @@
+use convert_case::Casing;
 use std::marker::PhantomData;
 
 use proc_macro::{TokenStream, TokenTree};
 use rspirv::{
     self,
-    spirv::{self, BuiltIn, Decoration},
+    spirv::{self, BuiltIn},
 };
 use rustc_hash::FxHashMap;
 
@@ -55,7 +56,7 @@ enum InvalidType {
     Float { width: u32 },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Type {
     F32,
     U32,
@@ -66,9 +67,16 @@ enum Type {
     /// a spec constant references it, then we throw an error.
     Invalid(InvalidType),
 }
+#[derive(Debug)]
 struct Vector {
     base: Type,
     count: u32,
+}
+#[derive(Debug)]
+struct Array {
+    base_ty: u32,
+    // Points to an OpConstant, the value of this is not the count!
+    count_id: u32,
 }
 #[derive(Debug)]
 enum SpecDefaultValue {
@@ -81,20 +89,213 @@ enum SpecDefaultValue {
     /// Boolean with *no external representation*, oopsie.
     Bool(bool),
 }
+#[derive(Debug)]
 enum ConstantValue {
     F32(u32),
     U32(u32),
     I32(u32),
     Invalid(InvalidType),
 }
+#[derive(Debug)]
 struct EntryPoint {
     /// UTF-8, No internal nulls. Multiple entry points with the same name are
     /// allowable as long as they don't also have the same execution model.
     name: String,
     /// loosely, the type of shader this entry point implements.
     model: spirv::ExecutionModel,
+    /// Which global OpVariables this entry point interacts with. This does
+    /// *not* necessarily mean that all these interfaces are statically-used --
+    /// it may be a superset thereof.
+    interfaces: Vec<u32>,
 }
-#[derive(Default)]
+trait OperandExt {
+    fn unwrap_literal_bool(&self) -> bool;
+}
+impl OperandExt for rspirv::dr::Operand {
+    fn unwrap_literal_bool(&self) -> bool {
+        let bits = self.unwrap_literal_bit32();
+        assert!(bits == 0 || bits == 1);
+        bits == 1
+    }
+}
+#[derive(Debug)]
+enum DepthMode {
+    NotDepth = 0,
+    Depth = 1,
+    Unknown = 2,
+}
+#[derive(Debug)]
+enum SamplingMode {
+    Unknown = 0,
+    Sampled = 1,
+    // Storage OR subpass input.
+    Storage = 2,
+}
+impl TryFrom<u32> for DepthMode {
+    type Error = ();
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Self::NotDepth,
+            1 => Self::Depth,
+            2 => Self::Unknown,
+            _ => return Err(()),
+        })
+    }
+}
+impl TryFrom<u32> for SamplingMode {
+    type Error = ();
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Self::Unknown,
+            1 => Self::Sampled,
+            2 => Self::Storage,
+            _ => return Err(()),
+        })
+    }
+}
+#[derive(Debug)]
+struct ImageType {
+    // The type ID that results from sampling/loading from the image. This isn't
+    // relevant to us, since this isn't a property of the external image, but is
+    // instead how the texture addresser should cast the fetched values.
+    _sample_ty: u32,
+    // "Buffer" dimensionality means a vulkan TexelBuffer.
+    dim: spirv::Dim,
+    depth_mode: DepthMode,
+    is_arrayed: bool,
+    is_multisampled: bool,
+    sampling_mode: SamplingMode,
+    format: spirv::ImageFormat,
+    // Only used for Kernel execution modes, not shader. The access qualifiers
+    // of this are expressed through the NonReadabe/Writable decorations.
+    _access_qualifier: Option<spirv::AccessQualifier>,
+}
+impl ImageType {
+    fn new(operands: &[rspirv::dr::Operand]) -> Self {
+        let [
+            sample_ty,
+            dim,
+            depth_mode,
+            is_arrayed,
+            is_multisampled,
+            sampling_mode,
+            format,
+            // Access qualifier is for *kernel* modules, not shaders, so
+            // we dont care~
+            _access_qualifier @ ..,
+        ] = operands
+        else {
+            panic!("bad number of args")
+        };
+        Self {
+            _sample_ty: sample_ty.unwrap_id_ref(),
+            dim: dim.unwrap_dim(),
+            depth_mode: depth_mode.unwrap_literal_bit32().try_into().unwrap(),
+            is_arrayed: is_arrayed.unwrap_literal_bool(),
+            is_multisampled: is_multisampled.unwrap_literal_bool(),
+            sampling_mode: sampling_mode.unwrap_literal_bit32().try_into().unwrap(),
+            format: format.unwrap_image_format(),
+            _access_qualifier: None,
+        }
+    }
+    fn requirements(&self) -> ImageRequirements {
+        ImageRequirements {
+            dim: match (self.dim, self.is_arrayed) {
+                (spirv::Dim::Dim1D, false) => ImageDimensionality::D1,
+                (spirv::Dim::Dim1D, true) => ImageDimensionality::D1Array,
+                (spirv::Dim::Dim2D, false) => ImageDimensionality::D2,
+                (spirv::Dim::Dim2D, true) => ImageDimensionality::D2Array,
+                (spirv::Dim::Dim3D, false) => ImageDimensionality::D3,
+                (spirv::Dim::Dim3D, true) => ImageDimensionality::D3Array,
+                (spirv::Dim::DimCube, false) => ImageDimensionality::Cube,
+                (spirv::Dim::DimCube, true) => ImageDimensionality::CubeArray,
+                _ => unimplemented!(),
+            },
+            format: self.format,
+            multisampled: self.is_multisampled,
+        }
+    }
+}
+#[derive(Debug)]
+struct Sampler;
+#[derive(Debug)]
+struct CombinedImageSampler {
+    image_ty: u32,
+}
+#[derive(Debug)]
+enum ResourceType {
+    Image(ImageType),
+    Sampler(Sampler),
+    CombinedImageSampler(CombinedImageSampler),
+}
+#[derive(Default, Debug)]
+struct Decorations {
+    spec_id: Option<u32>,
+    builtin: Option<BuiltIn>,
+    descriptor_set: Option<u32>,
+    descriptor_binding: Option<u32>,
+    is_shader_storage_buffer: bool,
+    is_uniform_buffer: bool,
+}
+#[derive(Debug)]
+struct DescriptorBinding {
+    name: Option<String>,
+    ty: DescriptorBindingType,
+    // *may* be zero, in which case the type is irrelevant
+    array_count: u32,
+}
+impl DescriptorBinding {
+    const EMPTY: Self = Self {
+        name: None,
+        array_count: 0,
+        ty: DescriptorBindingType::Empty,
+    };
+}
+#[derive(Debug)]
+enum ImageDimensionality {
+    D1,
+    D1Array,
+    D2,
+    D2Array,
+    D3,
+    D3Array,
+    Cube,
+    CubeArray,
+}
+#[derive(Debug)]
+struct ImageRequirements {
+    dim: ImageDimensionality,
+    format: spirv::ImageFormat,
+    multisampled: bool,
+}
+#[derive(Debug)]
+enum DescriptorBindingType {
+    // This binding number is not included in the descriptor set. This is
+    // defined in the vulkan spec as being equivalent to an arbitrary type of
+    // descriptor with an array count of 0.
+    Empty,
+    StorageImage(ImageRequirements),
+    SampledImage(ImageRequirements),
+    Sampler,
+    CombinedImageSampler(ImageRequirements),
+    SubpassInput,
+    StorageBuffer,
+    UniformBuffer,
+    UniformTexelBuffer(),
+    StorageTexelBuffer(),
+}
+#[derive(Debug)]
+struct DescriptorSet(Vec<DescriptorBinding>);
+#[derive(Debug)]
+struct Pointer {
+    storage_class: spirv::StorageClass,
+    pointee_ty: u32,
+}
+#[derive(Debug)]
+struct Variable {
+    pointer_ty: u32,
+}
+#[derive(Default, Debug)]
 struct Module {
     // OpEntryPoints.
     entry_points: Vec<EntryPoint>,
@@ -102,19 +303,134 @@ struct Module {
     types: FxHashMap<u32, Type>,
     // All ResultIDs of types created by OpTypeVector
     vectors: FxHashMap<u32, Vector>,
-    // All ResultIDs decorated by `BuiltIn WorkgroupSize`
-    workgroup_sizes: Vec<u32>,
-    // ResultID -> OpDecorate SpecId value
-    spec_ids: FxHashMap<u32, u32>,
+    // ResultID -> Array of another type + count denoted by an ID ref to an
+    // OpConstant.
+    array_types: FxHashMap<u32, Array>,
+    // ResultID -> Decorations applied to it
+    decorations: FxHashMap<u32, Decorations>,
     // ResultID -> Name
     names: FxHashMap<u32, String>,
     // ResultID -> Constant value.
     constants: FxHashMap<u32, ConstantValue>,
     // ResultID -> SpecConstant value.
     spec_constants: FxHashMap<u32, SpecDefaultValue>,
+    // ResultID -> ImageTy, SamplerTy, etc.
+    resource_types: FxHashMap<u32, ResourceType>,
+    // ResultID -> Pointer storage class and type.
+    pointer_types: FxHashMap<u32, Pointer>,
+    // ResultID -> OpVariable
+    variables: FxHashMap<u32, Variable>,
+}
+impl Module {
+    fn get_descriptor_sets(&self) -> FxHashMap<u32, DescriptorSet> {
+        let mut set_binding_variable = FxHashMap::<u32, FxHashMap<u32, u32>>::default();
+        let mut descriptor_sets = FxHashMap::<u32, DescriptorSet>::default();
+        for (id, decorators) in &self.decorations {
+            if let Some(descriptor_set) = decorators.descriptor_set {
+                let has_duplicate = set_binding_variable
+                    .entry(descriptor_set)
+                    .or_default()
+                    .insert(decorators.descriptor_binding.unwrap(), *id)
+                    .is_some();
+                if has_duplicate {
+                    unimplemented!("Two resources cannot share the same (set,binding) pair");
+                }
+            }
+        }
+        for (set, binding_to_variable_id) in &set_binding_variable {
+            let max_binding_nr = *binding_to_variable_id.keys().max().unwrap();
+            let descriptor_bindings = descriptor_sets
+                .entry(*set)
+                .or_insert(DescriptorSet(Vec::new()));
+            for binding_nr in 0..=max_binding_nr {
+                let variable_id = binding_to_variable_id.get(&binding_nr).copied();
+                let binding = if let Some(variable_id) = variable_id {
+                    let variable = self.variables.get(&variable_id).unwrap();
+                    let pointer_ty = self.pointer_types.get(&variable.pointer_ty).unwrap();
+                    // MAY Point to OpType[Resource] OR OpTypeStructure
+                    // decorated with BufferBlock OR an OpTypeArray thereof!
+                    // :O The array types give us the descriptor array count.
+                    let (pointee_id, array_count) = {
+                        if let Some(array) = self.array_types.get(&pointer_ty.pointee_ty) {
+                            let count = match self.constants.get(&array.count_id).unwrap() {
+                                ConstantValue::U32(count) => *count,
+                                _ => unimplemented!(
+                                    "Descriptor set array length must be a simple compile-time constant."
+                                ),
+                            };
+                            (array.base_ty, count)
+                        } else {
+                            // Not an array, one less layer of indirection for us~.
+                            (pointer_ty.pointee_ty, 1)
+                        }
+                    };
+                    let pointee_decorations = self.decorations.get(&pointee_id);
+                    if pointee_decorations.is_some_and(|pointee| {
+                        pointee.is_shader_storage_buffer || pointee.is_uniform_buffer
+                    }) {
+                        let pointee_decorations = pointee_decorations.unwrap();
+                        // This is a uniform or storage buffer structure.
+                        let binding_ty = if pointee_decorations.is_shader_storage_buffer {
+                            DescriptorBindingType::StorageBuffer
+                        } else {
+                            DescriptorBindingType::UniformBuffer
+                        };
+                        DescriptorBinding {
+                            name: self.names.get(&variable_id).cloned(),
+                            ty: binding_ty,
+                            array_count,
+                        }
+                    } else {
+                        // This is something else...
+                        let resource_ty =
+                            self.resource_types.get(&pointee_id).unwrap_or_else(|| {
+                                panic!("Set {set} binding {binding_nr} is of unknown type")
+                            });
+                        let binding_ty = match resource_ty {
+                            ResourceType::Image(img) => {
+                                if matches!(img.dim, spirv::Dim::DimSubpassData) {
+                                    DescriptorBindingType::SubpassInput
+                                } else {
+                                    match img.sampling_mode {
+                                        SamplingMode::Sampled => {
+                                            DescriptorBindingType::SampledImage(img.requirements())
+                                        }
+                                        SamplingMode::Storage => {
+                                            DescriptorBindingType::StorageImage(img.requirements())
+                                        }
+                                        SamplingMode::Unknown => unimplemented!(),
+                                    }
+                                }
+                            }
+                            ResourceType::Sampler(_sampler) => DescriptorBindingType::Sampler,
+                            ResourceType::CombinedImageSampler(combined) => {
+                                let ResourceType::Image(img) =
+                                    self.resource_types.get(&combined.image_ty).unwrap()
+                                else {
+                                    unimplemented!();
+                                };
+                                DescriptorBindingType::CombinedImageSampler(img.requirements())
+                            }
+                        };
+
+                        DescriptorBinding {
+                            name: self.names.get(&variable_id).cloned(),
+                            ty: binding_ty,
+                            array_count,
+                        }
+                    }
+                } else {
+                    // Nothing was assigned to this binding.
+                    DescriptorBinding::EMPTY
+                };
+                descriptor_bindings.0.push(binding);
+            }
+        }
+        descriptor_sets
+    }
 }
 impl rspirv::binary::Consumer for Module {
-    fn consume_header(&mut self, module: rspirv::dr::ModuleHeader) -> rspirv::binary::ParseAction {
+    fn consume_header(&mut self, _module: rspirv::dr::ModuleHeader) -> rspirv::binary::ParseAction {
         rspirv::binary::ParseAction::Continue
     }
     fn initialize(&mut self) -> rspirv::binary::ParseAction {
@@ -132,12 +448,18 @@ impl rspirv::binary::Consumer for Module {
                 };
                 let model = model.unwrap_execution_model();
                 let name = name.unwrap_literal_string();
-                // The list of `in` and `out` variables this entry may access.
-                let _ = interfaces;
 
                 self.entry_points.push(EntryPoint {
                     name: name.to_owned(),
                     model,
+                    // The list of `in` and `out` variables this entry may
+                    // access. UNFORTUNATELY - prior to SPIRV 1.4, this does
+                    // *not* include all OpVariables, only those with Input and
+                    // Output storage class. todo: Polyfill this?
+                    interfaces: interfaces
+                        .iter()
+                        .map(|operand| operand.unwrap_id_ref())
+                        .collect(),
                 });
             }
             // Declaration of a name representing an int of some signedness and
@@ -197,27 +519,88 @@ impl rspirv::binary::Consumer for Module {
                     },
                 );
             }
-            // Used for "SpecId" showing into what index the spec constant will
-            // be placed. This can come *before* the declaration of the id they
-            // target, annoyingly.
+            Op::TypeArray => {
+                let id = inst.result_id.unwrap();
+                let [element_type, length_const_id] = inst.operands.as_slice() else {
+                    panic!("bad operands");
+                };
+                self.array_types.insert(
+                    id,
+                    Array {
+                        base_ty: element_type.unwrap_id_ref(),
+                        count_id: length_const_id.unwrap_id_ref(),
+                    },
+                );
+            }
+            Op::TypeImage => {
+                let id = inst.result_id.unwrap();
+                self.resource_types
+                    .insert(id, ResourceType::Image(ImageType::new(&inst.operands)));
+            }
+            Op::TypeSampler => {
+                let id = inst.result_id.unwrap();
+                self.resource_types
+                    .insert(id, ResourceType::Sampler(Sampler));
+            }
+            Op::TypeSampledImage => {
+                let id = inst.result_id.unwrap();
+                let image_ty = inst.operands[0].unwrap_id_ref();
+                self.resource_types.insert(
+                    id,
+                    ResourceType::CombinedImageSampler(CombinedImageSampler { image_ty }),
+                );
+            }
+            Op::TypePointer => {
+                let id = inst.result_id.unwrap();
+                let storage_class = inst.operands[0].unwrap_storage_class();
+                let ty = inst.operands[1].unwrap_id_ref();
+                self.pointer_types.insert(
+                    id,
+                    Pointer {
+                        storage_class,
+                        pointee_ty: ty,
+                    },
+                );
+            }
+            Op::Variable => {
+                let id = inst.result_id.unwrap();
+                let pointer_ty = inst.result_type.unwrap();
+                let [_storage_class, _initializer @ ..] = inst.operands.as_slice() else {
+                    panic!("bad parameters");
+                };
+                // _storage_classs is always equal to the pointer's storage class.
+                self.variables.insert(id, Variable { pointer_ty });
+            }
             Op::Decorate => {
+                use spirv::Decoration as Dec;
                 let target = inst.operands[0].unwrap_id_ref();
+                let decorations = self.decorations.entry(target).or_default();
                 let decoration = inst.operands[1].unwrap_decoration();
                 match decoration {
-                    Decoration::SpecId => {
+                    Dec::SpecId => {
                         let spec_id = inst.operands[2].unwrap_literal_bit32();
-                        // It is not an error for this to be specified several
-                        // times for the same target, weirdly.
-                        self.spec_ids.insert(target, spec_id);
+                        decorations.spec_id = Some(spec_id);
                     }
-                    Decoration::BuiltIn => {
+                    Dec::BuiltIn => {
                         let builtin = inst.operands[2].unwrap_built_in();
-                        if builtin == BuiltIn::WorkgroupSize {
-                            self.workgroup_sizes.push(target);
-                        }
+                        decorations.builtin = Some(builtin);
+                    }
+                    Dec::Binding => {
+                        let binding = inst.operands[2].unwrap_literal_bit32();
+                        decorations.descriptor_binding = Some(binding);
+                    }
+                    Dec::DescriptorSet => {
+                        let set = inst.operands[2].unwrap_literal_bit32();
+                        decorations.descriptor_set = Some(set);
+                    }
+                    Dec::BufferBlock => {
+                        decorations.is_shader_storage_buffer = true;
+                    }
+                    Dec::Block => {
+                        decorations.is_uniform_buffer = true;
                     }
                     _ => println!("ignoring decoration {decoration:?}"),
-                }
+                };
             }
             // For tagging constants with a human-readable variable name, taken
             // from the source code. Optional. This can come *before* the
@@ -228,6 +611,7 @@ impl rspirv::binary::Consumer for Module {
 
                 self.names.insert(target, name.to_owned());
             }
+            Op::MemberName => (),
             // An integer or floating-point constant.
             Op::SpecConstant => {
                 let ty = inst.result_type.unwrap();
@@ -306,7 +690,11 @@ impl rspirv::binary::Consumer for Module {
                 let ty = inst.result_type.unwrap();
                 let name = inst.result_id.unwrap();
 
-                if !self.workgroup_sizes.contains(&name) {
+                if self
+                    .decorations
+                    .get(&name)
+                    .is_none_or(|decorations| decorations.builtin != Some(BuiltIn::WorkgroupSize))
+                {
                     unimplemented!("only WorkgroupSize can have an SpecConstantComposite value");
                 }
                 let ty = self.vectors.get(&ty).unwrap();
@@ -362,6 +750,7 @@ fn input_string(input: TokenStream) -> String {
 fn from_spirv(spirv: &[u32]) -> TokenStream {
     let mut module = Module::default();
     rspirv::binary::parse_words(spirv, &mut module).unwrap_display();
+    println!("{:#?}", module.get_descriptor_sets());
     // Ensure we have at least one entry point, modules are invalid without one.
     assert!(!module.entry_points.is_empty());
     // Create a struct definition for all of the specialization constants.
@@ -411,9 +800,9 @@ fn from_spirv(spirv: &[u32]) -> TokenStream {
                     )
                 }
             };
-            let constant_id = module.spec_ids.get(binding_id).unwrap();
+            let constant_id = module.decorations.get(binding_id).unwrap().spec_id.unwrap();
             fields.push(Field {
-                constant_id: *constant_id,
+                constant_id,
                 name: quote::format_ident!("{name}"),
                 ty,
                 default_value,
@@ -445,7 +834,7 @@ fn from_spirv(spirv: &[u32]) -> TokenStream {
             /// from the shader.
             #[repr(C)]
             pub struct #name {
-                pub #(#field_name_1: #field_ty),*
+                #(pub #field_name_1: #field_ty),*
             }
             impl ::core::default::Default for #name {
                 fn default() -> Self {
@@ -476,13 +865,15 @@ fn from_spirv(spirv: &[u32]) -> TokenStream {
                 .count()
                 == 1;
             let entry_name = std::ffi::CString::new(this_entry.name.clone()).unwrap();
-            // Todo: GLSL case to UPPER_SNAKE_CASE
+            let upper_snake_case = this_entry.name.to_case(convert_case::Case::UpperSnake);
             let const_name = if !is_unique {
-                this_entry.name.to_ascii_uppercase()
-                    + "_"
-                    + execution_model_upper_str(this_entry.model)
+                // Append the execution model, resulting in e.g. `MAIN_COMPUTE`.
+                // *this* is guaranteed unique, as there can't be several entry
+                // points with the same name *and* execution model in a SPIRV
+                // module.
+                upper_snake_case + "_" + execution_model_upper_str(this_entry.model)
             } else {
-                this_entry.name.to_ascii_uppercase()
+                upper_snake_case
             };
             let model_typestate_marker = execution_model_typestate(this_entry.model);
             entries.push(EntryConst {
@@ -560,7 +951,7 @@ fn read_spirv_words(path: impl AsRef<std::path::Path>) -> Vec<u32> {
     const SWAPPED_MAGIC: u32 = MAGIC.swap_bytes();
 
     let bytes = std::fs::read(path).unwrap();
-    assert!(bytes.len() % 4 == 0);
+    assert!(bytes.len().is_multiple_of(4));
     let mut words = vec![0u32; bytes.len() / 4];
 
     unsafe {
@@ -581,6 +972,7 @@ fn read_spirv_words(path: impl AsRef<std::path::Path>) -> Vec<u32> {
     }
 }
 
+/*
 fn main() -> () {
     let path = std::env::args()
         .nth(1)
@@ -645,4 +1037,4 @@ fn main() -> () {
         }
     }
     todo!()
-}
+}*/
