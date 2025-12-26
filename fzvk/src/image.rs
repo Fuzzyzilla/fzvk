@@ -258,7 +258,7 @@ impl MipCount {
 }
 
 /// The number of dimensions in an image, including whether it's an array.
-pub trait Dimensionality {
+pub trait Dimensionality: 'static {
     /// The size in each dimension, plus an array layer count if applicable.
     type Extent: Extent;
     type SubresourceLayers: SubresourceLayers;
@@ -399,7 +399,7 @@ pub trait ResourceRange {
 pub struct SubresourceRange(pub core::ops::Range<u32>);
 pub struct LayeredSubresourceRange{pub mips: core::ops::Range<u32>, pub layers: core::ops::Range<u32>}*/
 
-pub unsafe trait ImageSamples {
+pub unsafe trait ImageSamples: 'static {
     fn flag(self) -> vk::SampleCountFlags;
 }
 #[derive(Clone, Copy)]
@@ -439,31 +439,81 @@ crate::thin_handle! {
     /// * `Format`: The texel format of the image.
     /// * `Samples`: Whether the image is [single-](SingleSampled) or
     ///   [multi-](MultiSampled)sampled.
+    ///
+    /// Notably lacking in this state is the Image's current layout. This is
+    /// because the layout of the image can change without CPU interaction. In
+    /// the scope of a recording command buffer however, this *can* be tracked.
+    /// See [`Self::discard_layout`] and [`Self::assume_layout`].
     #[must_use = "dropping the handle will not destroy the image and may leak resources"]
     pub struct Image<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
         vk::Image
     );
 }
-pub struct Transition<'a> {
-    pub(crate) from: vk::ImageLayout,
-    pub(crate) to: vk::ImageLayout,
-    pub(crate) image: vk::Image,
-    pub(crate) subresource_range: vk::ImageSubresourceRange,
-    _phantom: core::marker::PhantomData<&'a ()>,
-}
+
 impl<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>
     Image<Usage, Dim, Format, Samples>
 {
-    #[must_use = "must be submitted to a `barrier` command to have any effect."]
-    pub unsafe fn transition(
+    /// Reference this image with Undefined layout.
+    ///
+    /// It is always safe to assume an image is in undefined layout.
+    pub unsafe fn discard_layout(
         &'_ self,
-        from: vk::ImageLayout,
-        to: vk::ImageLayout,
-    ) -> Transition<'_> {
+    ) -> ImageReference<'_, Usage, Dim, Format, Samples, layout::Undefined> {
+        ImageReference(self.0, core::marker::PhantomData)
+    }
+    /// Reference this image as the given layout.
+    pub unsafe fn assume_layout<Layout>(
+        &'_ self,
+        _layout: Layout,
+    ) -> ImageReference<'_, Usage, Dim, Format, Samples, Layout>
+    where
+        Layout: layout::Layout,
+        Self: layout::CanTransitionIntoLayout<Layout>,
+    {
+        ImageReference(self.0, core::marker::PhantomData)
+    }
+}
+
+/// A reference to an image in a given [Layout](layout::Layout), for use during
+/// the recording of command buffers. See [`Image`] documentation for rationale.
+pub struct ImageReference<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    Layout: layout::Layout,
+>(
+    crate::handle::NonNull<vk::Image>,
+    core::marker::PhantomData<(&'a Image<Usage, Dim, Format, Samples>, Layout)>,
+);
+
+impl<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    Layout: layout::Layout,
+> ImageReference<'a, Usage, Dim, Format, Samples, Layout>
+{
+    /// Transition into a new layout.
+    ///
+    /// If the old contents need not be preserved during this transition, or the
+    /// image hasn't yet been initialized into a format at all,
+    /// [`Self::reinitialize_as`] should be used.
+    #[doc(alias = "hrt")]
+    pub fn transition<NewLayout>(
+        self,
+        _into_layout: NewLayout,
+    ) -> Transition<'a, Usage, Dim, Format, Samples, NewLayout>
+    where
+        NewLayout: layout::Layout,
+        Image<Usage, Dim, Format, Samples>: layout::CanTransitionIntoLayout<NewLayout>,
+    {
         Transition {
-            from,
-            to,
-            image: unsafe { self.handle() },
+            from: Layout::LAYOUT,
+            image: self.0,
             subresource_range: vk::ImageSubresourceRange {
                 aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
                 base_mip_level: 0,
@@ -473,6 +523,153 @@ impl<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: Im
             },
             _phantom: core::marker::PhantomData,
         }
+    }
+    /// Transition into a new layout, discarding the old contents of the image.
+    /// This is potentially *much* more efficient than doing a normal
+    /// [`Self::transition`], and should be used wherever the contents of the
+    /// image need not be preserved.
+    ///
+    /// This is also the only valid way to initialize an image into a layout on
+    /// it's first use.
+    pub fn reinitialize_as<NewLayout>(
+        self,
+        _into_layout: NewLayout,
+    ) -> Transition<'a, Usage, Dim, Format, Samples, NewLayout>
+    where
+        NewLayout: layout::Layout,
+        Image<Usage, Dim, Format, Samples>: layout::CanTransitionIntoLayout<NewLayout>,
+    {
+        Transition {
+            from: vk::ImageLayout::UNDEFINED,
+            image: self.0,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            },
+            _phantom: core::marker::PhantomData,
+        }
+    }
+    /// Create a no-op transition. This method is unavailable on `Undefined`
+    /// layout images.
+    pub fn identity(self) -> Transition<'a, Usage, Dim, Format, Samples, Layout>
+    where
+        // This might seem redundant, but it prevents an undefined -> undefined
+        // barrier. `CanTransitionIntoLayout` (Dissallows Undefined) =/= "can be
+        // in layout" (Allows undefined) :3
+        Image<Usage, Dim, Format, Samples>: layout::CanTransitionIntoLayout<Layout>,
+    {
+        Transition {
+            from: Layout::LAYOUT,
+            image: self.0,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            },
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+/// An opaque struct representing a pending image layout transition. Pass this
+/// into [`crate::Device::barrier`] to get back an [`ImageReference`] in the new
+/// layout.
+#[must_use = "must be submitted to a `barrier` command to have any effect."]
+pub struct Transition<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    IntoLayout: layout::Layout,
+> {
+    pub(crate) from: vk::ImageLayout,
+    pub(crate) image: crate::handle::NonNull<vk::Image>,
+    pub(crate) subresource_range: vk::ImageSubresourceRange,
+    _phantom:
+        core::marker::PhantomData<ImageReference<'a, Usage, Dim, Format, Samples, IntoLayout>>,
+}
+impl<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    IntoLayout: layout::Layout,
+> Transition<'a, Usage, Dim, Format, Samples, IntoLayout>
+{
+    fn into_after_transition(self) -> ImageReference<'a, Usage, Dim, Format, Samples, IntoLayout> {
+        ImageReference(self.image, core::marker::PhantomData)
+    }
+}
+
+pub trait ImageTransitions<'a> {
+    type AfterTransition<'b>;
+    /// Internal use. See [`Transition`] for usage.
+    fn as_barriers<'this>(
+        &'this self,
+        src_access_mask: vk::AccessFlags,
+        dst_access_mask: vk::AccessFlags,
+    ) -> impl AsRef<[vk::ImageMemoryBarrier<'this>]>;
+    /// Internal use. See [`Transition`] for usage.
+    fn into_after_transition(self) -> Self::AfterTransition<'a>;
+}
+impl ImageTransitions<'_> for () {
+    type AfterTransition<'b> = ();
+    fn as_barriers<'this>(
+        &'this self,
+        _src_access_mask: vk::AccessFlags,
+        _dst_access_mask: vk::AccessFlags,
+    ) -> impl AsRef<[vk::ImageMemoryBarrier<'this>]> {
+        []
+    }
+    fn into_after_transition(self) -> Self::AfterTransition<'static> {}
+}
+impl<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    IntoLayout: layout::Layout,
+> ImageTransitions<'a> for Transition<'a, Usage, Dim, Format, Samples, IntoLayout>
+{
+    type AfterTransition<'b> = ImageReference<'b, Usage, Dim, Format, Samples, IntoLayout>;
+    fn into_after_transition(self) -> Self::AfterTransition<'a> {
+        self.into_after_transition()
+    }
+    fn as_barriers<'this>(
+        &'this self,
+        src_access_mask: vk::AccessFlags,
+        dst_access_mask: vk::AccessFlags,
+    ) -> impl AsRef<[vk::ImageMemoryBarrier<'this>]> {
+        [vk::ImageMemoryBarrier::default()
+            .image(self.image.get())
+            .subresource_range(self.subresource_range)
+            .old_layout(self.from)
+            .new_layout(IntoLayout::LAYOUT)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_access_mask(src_access_mask)
+            .dst_access_mask(dst_access_mask)]
+    }
+}
+impl<'a, A: ImageTransitions<'a>> ImageTransitions<'a> for (A,) {
+    type AfterTransition<'b> = (A::AfterTransition<'b>,);
+    fn as_barriers<'this>(
+        &'this self,
+        src_access_mask: vk::AccessFlags,
+        dst_access_mask: vk::AccessFlags,
+    ) -> impl AsRef<[vk::ImageMemoryBarrier<'this>]> {
+        self.0.as_barriers(src_access_mask, dst_access_mask)
+    }
+    fn into_after_transition(self) -> Self::AfterTransition<'a> {
+        (self.0.into_after_transition(),)
     }
 }
 
@@ -490,4 +687,110 @@ crate::thin_handle! {
     pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
         vk::ImageView
     );
+}
+
+pub mod layout {
+    use super::*;
+    pub trait Layout {
+        const LAYOUT: vk::ImageLayout;
+    }
+    /// Implemented by types for which a transition into the layout denoted by
+    /// `Which` is allowable.
+    ///
+    /// Note that this is not the same as "can be in layout" - this trait
+    /// disallows transitions into [`Undefined`], although all images can *be*
+    /// in [`Undefined`] layout.
+    pub trait CanTransitionIntoLayout<Which: Layout> {}
+
+    /// Image is usable as the given layout. For every given layout, this is
+    /// implemented by the layout itself and the General layout which is usable
+    /// for all tasks.
+    pub trait UsableAs<Which: Layout>: Layout {}
+    /// General layout can be used for any layout's task.
+    impl<Other: Layout> UsableAs<Other> for General {}
+    // Cannot `impl<T> UsableAs<T> for T` because that interferes with the above.
+
+    /// This layout cannot be transitioned into. Transitions *from* this layout
+    /// mean "discard contents", which may yield better performance if the
+    /// contents need not be preserved.
+    pub struct Undefined;
+    impl Layout for Undefined {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::UNDEFINED;
+    }
+
+    pub struct General;
+    impl Layout for General {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::GENERAL;
+    }
+    // Anything can have General layout!
+    impl<T> CanTransitionIntoLayout<General> for T {}
+
+    pub struct ColorAttachment;
+    impl Layout for ColorAttachment {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+    }
+    impl UsableAs<Self> for ColorAttachment {}
+    // Only color aspect images with usage including `COLOR_ATTACHMENT_BIT` can
+    // have this layout.
+    impl<
+        Usage: crate::usage::ImageSuperset<crate::usage::ColorAttachment>,
+        Dim: Dimensionality,
+        Format: format::HasAspect<format::Color>,
+        Samples: ImageSamples,
+    > CanTransitionIntoLayout<ColorAttachment> for Image<Usage, Dim, Format, Samples>
+    {
+    }
+
+    pub struct DepthStencilAttachment;
+    impl Layout for DepthStencilAttachment {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+    impl UsableAs<Self> for DepthStencilAttachment {}
+    /* FIXME: Format needs to be bound by `HasAspect<Depth AND/OR Stencil>`
+    impl<
+        Usage: crate::usage::ImageSuperset<crate::usage::DepthStencilAttachment>,
+        Dim: Dimensionality,
+        Format: format::HasAspect<format::Depth>,
+        Samples: ImageSamples,
+    > CanHaveLayout<ColorAttachment> for Image<Usage, Dim, Format, Samples>
+    {
+    }
+    pub struct DepthStencilReadOnly;
+    impl Layout for DepthStencilReadOnly {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }*/
+
+    pub struct ShaderReadOnly;
+    impl Layout for ShaderReadOnly {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    }
+    impl UsableAs<Self> for ShaderReadOnly {}
+
+    pub use crate::usage::TransferDst;
+    impl Layout for TransferDst {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+    }
+    impl<
+        Usage: crate::usage::ImageSuperset<crate::usage::TransferDst>,
+        Dim: Dimensionality,
+        Format: format::Format,
+        Samples: ImageSamples,
+    > CanTransitionIntoLayout<TransferDst> for Image<Usage, Dim, Format, Samples>
+    {
+    }
+    impl UsableAs<Self> for TransferDst {}
+
+    pub use crate::usage::TransferSrc;
+    impl Layout for TransferSrc {
+        const LAYOUT: vk::ImageLayout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+    }
+    impl<
+        Usage: crate::usage::ImageSuperset<crate::usage::TransferSrc>,
+        Dim: Dimensionality,
+        Format: format::Format,
+        Samples: ImageSamples,
+    > CanTransitionIntoLayout<TransferSrc> for Image<Usage, Dim, Format, Samples>
+    {
+    }
+    impl UsableAs<Self> for TransferSrc {}
 }

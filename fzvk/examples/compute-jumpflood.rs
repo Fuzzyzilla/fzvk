@@ -547,6 +547,11 @@ pub fn main() -> Result<()> {
         let [mut command_buffer] = device.allocate_command_buffers(&mut command_pool, Primary)?;
         let mut recording = device.begin_command_buffer(&mut command_pool, &mut command_buffer)?;
 
+        // Reference our images in Undefined layout, since they haven't been
+        // initialized yet.
+        let reference_image_ref = reference_image.discard_layout();
+        let pingpong_image_ref = pingpong_array.discard_layout();
+
         // Barrier building blocks that we'll be using a lot! Specifies a wait
         // until all previous compute shaders have finished and flushes their
         // writes to any storage.
@@ -558,16 +563,14 @@ pub fn main() -> Result<()> {
             barrier::ReadWriteAccess::SHADER_READ_WRITE,
         );
 
-        // Import the image from the host buffer
-        device
+        // Immediately transition our reference image to transfer dst layout,
+        // before the transfer occurs. FIXME: allow multiple transitions per
+        // barrier.
+        let reference_image_ref = device
             // Transition the images from Undefined -> The formats we need.
             .barrier(
                 &mut recording,
-                // Waiting on the host to write to the buffer.
-                barrier::MemoryCondition::StageAccess(barrier::StageAccess::from_stage_access(
-                    barrier::PipelineStages::HOST,
-                    barrier::WriteAccess::HOST_WRITE,
-                )),
+                barrier::MemoryCondition::None,
                 // Block transfer from occuring until the image is in the right
                 // layout to accept it.
                 barrier::StageAccess::from_stage_access(
@@ -575,30 +578,49 @@ pub fn main() -> Result<()> {
                     barrier::ReadWriteAccess::TRANSFER_WRITE,
                 )
                 .into(),
-                [buffer.barrier()],
-                [
-                    reference_image.transition(
-                        vk::ImageLayout::UNDEFINED,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    ),
-                    pingpong_array.transition(vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL),
-                ],
-            )
-            // Copy the image from host memory
-            .copy_buffer_to_image(
-                &mut recording,
-                &buffer,
-                &reference_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                // Whole image
-                [BufferImageCopy {
-                    buffer_offset: 0,
-                    image_offset: Offset::ORIGIN,
-                    image_extent: extent,
-                    pitch: BufferPitch::PACKED,
-                    layers: SubresourceMip::ZERO,
-                }],
-            )
+                [],
+                reference_image_ref.reinitialize_as(layout::TransferDst),
+            );
+        // Immediately transition our pingpong image to general layout, before
+        // the shader writes to it.
+        let pingpong_image_ref = device.barrier(
+            &mut recording,
+            barrier::MemoryCondition::None,
+            barrier::StageAccess::shader_access::<Compute>(barrier::ReadWriteAccess::SHADER_WRITE)
+                .into(),
+            [buffer.barrier()],
+            pingpong_image_ref.reinitialize_as(layout::General),
+        );
+        // Block transfer until the buffer is updated by the host.
+        device.barrier(
+            &mut recording,
+            barrier::MemoryCondition::StageAccess(barrier::StageAccess::from_stage_access(
+                barrier::PipelineStages::HOST,
+                barrier::WriteAccess::HOST_WRITE,
+            )),
+            barrier::MemoryBlock::StageAccess(barrier::StageAccess::from_stage_access(
+                barrier::PipelineStages::TRANSFER,
+                barrier::ReadWriteAccess::TRANSFER_READ,
+            )),
+            [buffer.barrier()],
+            (),
+        );
+        // Import the image from the host buffer.
+        device.copy_buffer_to_image(
+            &mut recording,
+            &buffer,
+            &reference_image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            // Whole image
+            [BufferImageCopy {
+                buffer_offset: 0,
+                image_offset: Offset::ORIGIN,
+                image_extent: extent,
+                pitch: BufferPitch::PACKED,
+                layers: SubresourceMip::ZERO,
+            }],
+        );
+        let _reference_image_ref = device
             // Wait until import transfer is complete...
             .barrier(
                 &mut recording,
@@ -609,10 +631,7 @@ pub fn main() -> Result<()> {
                 .into(),
                 block_compute_read_write.into(),
                 [],
-                [reference_image.transition(
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::GENERAL,
-                )],
+                reference_image_ref.transition(layout::General),
             );
         ash_device.cmd_bind_pipeline(
             recording.handle(),
@@ -693,17 +712,17 @@ pub fn main() -> Result<()> {
                     wait_compute_write.into(),
                     block_compute_read_write.into(),
                     [],
-                    [],
-                )
-                .dispatch(
-                    &mut recording,
-                    [extent.width, extent.height, NonZero::<u32>::MIN],
+                    (),
                 );
+            device.dispatch(
+                &mut recording,
+                [extent.width, extent.height, NonZero::<u32>::MIN],
+            );
             // Swap the read image and write image for the next iteration.
             readbuf = if readbuf == 0 { 1 } else { 0 };
         }
         // Export the final image back to the host buffer
-        device.barrier(
+        let _pingpong_image_ref = device.barrier(
             &mut recording,
             wait_compute_write.into(),
             barrier::StageAccess::from_stage_access(
@@ -712,14 +731,9 @@ pub fn main() -> Result<()> {
             )
             .into(),
             [],
-            [
-                // FIXME: we only actually need to transition
-                // pingpong_array[readbuf].
-                pingpong_array.transition(
-                    vk::ImageLayout::GENERAL,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                ),
-            ],
+            // FIXME: we only actually need to transition
+            // pingpong_array[readbuf].
+            pingpong_image_ref.transition(layout::TransferSrc),
         );
         // It's safe to write to the buffer after the read at the start, due to
         // the transfer -> compute shader -> transfer dependency chain.

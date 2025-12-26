@@ -1,6 +1,6 @@
 use super::vk;
 /// A vulkan vertex or texel format.
-pub unsafe trait Format {
+pub unsafe trait Format: 'static {
     type Aspect: Aspect;
     /// An opaque type representing the compatibility of this format. Images
     /// views with different formats of the same compatibility can safely alias

@@ -95,7 +95,7 @@ impl DescriptorBinding for () {
     ) -> vk::DescriptorSetLayoutBinding<'a> {
         vk::DescriptorSetLayoutBinding::default()
             .descriptor_type(Self::TYPE)
-            .descriptor_count(Self::COUNT)
+            .descriptor_count(<Self as DescriptorBinding>::COUNT)
             .binding(binding)
             .stage_flags(stage_flags)
     }

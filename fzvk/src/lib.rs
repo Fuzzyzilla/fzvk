@@ -789,12 +789,14 @@ impl<'device> Device<'device> {
     /// Allocate [`CommandBuffer`]s from the given pool.
     ///
     /// The constant `N` is the number of command buffers to allocate. Use this
-    /// along with a destructuring to create several buffers at once:
+    /// along with a destructuring to create several buffers at once, which may
+    /// be more efficient:
     /// ```no_run
     /// # use fzvk::*;
     /// # let device : Device = todo!();
     /// # let mut pool : CommandPool = todo!();
     /// # unsafe {
+    /// let [single_buffer] = device.allocate_command_buffers(&mut pool, Primary).unwrap();
     /// let [buffer_a, buffer_b] = device.allocate_command_buffers(&mut pool, Primary).unwrap();
     /// # }
     /// ```
@@ -803,6 +805,9 @@ impl<'device> Device<'device> {
         pool: &mut CommandPool,
         _: Level,
     ) -> Result<[CommandBuffer<Level>; N], AllocationError> {
+        // No good way to statically assert this, but because it is known at
+        // const-time this is definitely compiled out~
+        assert_ne!(N, 0);
         let vec = self
             .0
             .allocate_command_buffers(
@@ -815,12 +820,16 @@ impl<'device> Device<'device> {
         let array = <[vk::CommandBuffer; N]>::try_from(vec).unwrap();
         Ok(array.map(|h| CommandBuffer::from_handle_unchecked(h)))
     }
-    /// Free [`CommandBuffer`]s back to the given pool.
+    /// Free [`CommandBuffer`]s back to the given pool. It is not necessary to
+    /// do this before destroying the command buffer.
     pub unsafe fn free_command_buffers<const N: usize, Level: CommandBufferLevel>(
         &self,
         pool: &mut CommandPool,
         buffers: [CommandBuffer<Level>; N],
     ) -> &Self {
+        // No good way to statically assert this, but because it is known at
+        // const-time this is definitely compiled out~
+        assert_ne!(N, 0);
         self.0
             .free_command_buffers(pool.handle(), ThinHandle::handles_of(&buffers));
         self
@@ -1304,8 +1313,9 @@ impl<'device> Device<'device> {
     }
     pub unsafe fn barrier<
         'a,
+        'images,
         const BUFFER_BARRIERS: usize,
-        const IMAGE_BARRIERS: usize,
+        ImageTransitions: image::ImageTransitions<'images>,
         Level: CommandBufferLevel,
     >(
         &'a self,
@@ -1313,8 +1323,8 @@ impl<'device> Device<'device> {
         wait_for: barrier::MemoryCondition,
         block: barrier::MemoryBlock,
         buffer_barriers: [BufferBarrier<'_>; BUFFER_BARRIERS],
-        image_transitions: [image::Transition<'_>; IMAGE_BARRIERS],
-    ) -> &'a Self {
+        image_transitions: ImageTransitions,
+    ) -> ImageTransitions::AfterTransition<'images> {
         let (src_stage, src_access) = wait_for.into_stage_access();
         let (dst_stage, dst_access) = block.into_stage_access();
         self.0.cmd_pipeline_barrier(
@@ -1336,20 +1346,23 @@ impl<'device> Device<'device> {
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             }),
-            &image_transitions.map(|transition| {
-                vk::ImageMemoryBarrier::default()
-                    .image(transition.image)
-                    .old_layout(transition.from)
-                    .new_layout(transition.to)
-                    .subresource_range(transition.subresource_range)
-                    .src_access_mask(src_access)
-                    .dst_access_mask(dst_access)
-                    // Defines a "none" ownership transfer.
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            }),
+            image_transitions
+                .as_barriers(src_access, dst_access)
+                .as_ref(),
+            /*image_transitions.map(|transition| {
+                    vk::ImageMemoryBarrier::default()
+                        .image(transition.image)
+                        .old_layout(transition.from)
+                        .new_layout(transition.to)
+                        .subresource_range(transition.subresource_range)
+                        .src_access_mask(src_access)
+                        .dst_access_mask(dst_access)
+                        // Defines a "none" ownership transfer.
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            }),*/
         );
-        self
+        image_transitions.into_after_transition()
     }
     pub unsafe fn dispatch<'a, Level: CommandBufferLevel, MaybeInsideRender: CommandBufferState>(
         &'a self,
