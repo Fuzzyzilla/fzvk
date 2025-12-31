@@ -8,6 +8,20 @@ use rspirv::{
 };
 use rustc_hash::FxHashMap;
 
+enum Source {
+    File(std::path::PathBuf),
+    Literal(String),
+}
+
+struct CompilationSettings {
+    target_spirv_version: shaderc::SpirvVersion,
+    target_environment_version: shaderc::EnvVersion,
+    stage: shaderc::ShaderKind,
+    source: Source,
+    language: shaderc::SourceLanguage,
+    defines: FxHashMap<String, String>,
+}
+
 trait UnwrapDisplay {
     type Ok;
     fn unwrap_display(self) -> Self::Ok;
@@ -297,6 +311,7 @@ struct Variable {
 }
 #[derive(Default, Debug)]
 struct Module {
+    version: (u8, u8),
     // OpEntryPoints.
     entry_points: Vec<EntryPoint>,
     // Some basic types, created by OpTypeBool/Float/Int
@@ -430,7 +445,8 @@ impl Module {
     }
 }
 impl rspirv::binary::Consumer for Module {
-    fn consume_header(&mut self, _module: rspirv::dr::ModuleHeader) -> rspirv::binary::ParseAction {
+    fn consume_header(&mut self, module: rspirv::dr::ModuleHeader) -> rspirv::binary::ParseAction {
+        self.version = module.version();
         rspirv::binary::ParseAction::Continue
     }
     fn initialize(&mut self) -> rspirv::binary::ParseAction {
@@ -896,16 +912,25 @@ fn from_spirv(spirv: &[u32]) -> TokenStream {
         }
     };
 
+    let module_version = {
+        let (major, minor) = module.version;
+        quote::quote! {(#major, #minor)}
+    };
+
     quote::quote! {
         #specialization_struct_def
         pub struct Module;
         unsafe impl ::fzvk::pipeline::StaticSpirV for Module {
             type Specialization = #specialization_struct_name;
             const SPIRV : &[u32] = &[#(#spirv),*];
+            const VERSION : (u8, u8) = #module_version;
         }
         #entry_constants
     }
     .into()
+}
+fn from_uncompiled(settings: CompilationSettings) -> TokenStream {
+    from_spirv(todo!())
 }
 /// Accepts a string literal as a filepath, expands to a static slice of the
 /// bytes of SPIR-V within the file.

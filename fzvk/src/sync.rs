@@ -2,391 +2,280 @@
 use super::{ShaderStage, ThinHandle, vk};
 
 pub mod barrier {
-    //! Types for describing execution and/or memory dependencies.
-    //!
-    //! These are invoked by the user via `vkCmdPipelineBarrier` or through a
-    //! wait semaphore operation.
-    use super::{ShaderStage, vk};
-    pub trait AccessFlags: core::ops::BitOr<Output = Self> + Copy {
-        const NONE: Self;
-        fn into_flags(self) -> vk::AccessFlags;
-    }
+    use super::vk;
     #[derive(Copy, Clone)]
-    pub struct StageAccess<Access: AccessFlags> {
-        stages: PipelineStages,
-        access: Access,
-    }
-    impl<Access: AccessFlags> StageAccess<Access> {
-        /// Stages, with no memory access types.
-        pub fn from_stages(stages: PipelineStages) -> Self {
-            Self {
-                stages,
-                access: AccessFlags::NONE,
-            }
-        }
-        pub fn shader<Stage: ShaderStage>() -> Self {
-            Self::from_stages(Stage::PIPE_STAGE)
-        }
-        pub unsafe fn shader_access<Stage: ShaderStage>(access: Access) -> Self {
-            Self::from_stage_access(Stage::PIPE_STAGE, access)
-        }
-        /// Stages and access flags.
-        /// # Safety
-        /// Each access flag must be a type used by at least one of the members
-        /// of `stages`.
-        pub const unsafe fn from_stage_access(stages: PipelineStages, access: Access) -> Self {
-            Self { stages, access }
-        }
-        /// Convert into a stage flags and access flags pair.
-        pub fn into_stage_access(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
-            (self.stages.into_flags(), self.access.into_flags())
-        }
-    }
-    impl<Access: AccessFlags> core::ops::BitOr<StageAccess<Access>> for StageAccess<Access> {
-        type Output = StageAccess<Access>;
-        fn bitor(self, rhs: StageAccess<Access>) -> Self::Output {
-            StageAccess {
-                stages: self.stages | rhs.stages,
-                access: self.access | rhs.access,
-            }
-        }
-    }
-    impl<Access: AccessFlags> core::ops::BitOr<StageAccess<Access>> for &'_ StageAccess<Access> {
-        type Output = StageAccess<Access>;
-        fn bitor(self, rhs: StageAccess<Access>) -> Self::Output {
-            StageAccess {
-                stages: self.stages | rhs.stages,
-                access: self.access | rhs.access,
-            }
-        }
-    }
-    impl<Access: AccessFlags> core::ops::BitOr<&'_ StageAccess<Access>> for StageAccess<Access> {
-        type Output = StageAccess<Access>;
-        fn bitor(self, rhs: &'_ StageAccess<Access>) -> Self::Output {
-            StageAccess {
-                stages: self.stages | rhs.stages,
-                access: self.access | rhs.access,
-            }
-        }
-    }
-    impl<'a, Access: AccessFlags> core::ops::BitOr<&'a StageAccess<Access>>
-        for &'a StageAccess<Access>
-    {
-        type Output = StageAccess<Access>;
-        fn bitor(self, rhs: &'a StageAccess<Access>) -> Self::Output {
-            StageAccess {
-                stages: self.stages | rhs.stages,
-                access: self.access | rhs.access,
-            }
-        }
-    }
-    /// Description of what parts of the execution pipe should finish before
-    /// signaling a condition.
-    pub enum ExecutionCondition {
-        /// Wait until all prior commands finish. (a.k.a. `BOTTOM_OF_PIPE`)
-        All,
-        /// No dependency, the wait condition is immediately satisfied. (a.k.a.
-        /// `TOP_OF_PIPE`)
-        None,
-        /// Wait until all these stages have finished executing.
-        After(PipelineStages),
-    }
-    impl ExecutionCondition {
-        /// Convert into a stage flags.
-        pub fn into_stages(self) -> vk::PipelineStageFlags {
-            match self {
-                ExecutionCondition::All => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                ExecutionCondition::None => vk::PipelineStageFlags::TOP_OF_PIPE,
-                ExecutionCondition::After(s) => s.into_flags(),
-            }
-        }
-    }
-    /// Description of what parts of the execution pipe should block while
-    /// waiting for a condition.
-    pub enum ExecutionBlock {
-        /// Block all future commands. (a.k.a. `TOP_OF_PIPE`)
-        All,
-        /// No dependency, do not block anything (a.k.a `BOTTOM_OF_PIPE`)
-        None,
-        /// Don't run these stages until the condition is met.
-        Before(PipelineStages),
-    }
-    impl ExecutionBlock {
-        /// Convert into a stage flags.
-        pub fn into_stages(self) -> vk::PipelineStageFlags {
-            match self {
-                ExecutionBlock::All => vk::PipelineStageFlags::TOP_OF_PIPE,
-                ExecutionBlock::None => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                ExecutionBlock::Before(s) => s.into_flags(),
-            }
-        }
-    }
-    /// A synchronization condition to wait on, and which caches need to be
-    /// flushed after completion.
-    #[derive(Clone, Copy)]
-    pub enum MemoryCondition {
-        /// An execution dependency on all prior commands. (a.k.a
-        /// `BOTTOM_OF_PIPE` or `ALL_COMMANDS`, depending on whether the access
-        /// is empty or not)
-        All(WriteAccess),
-        /// No dependency, the wait condition is immediately satisfied and no
-        /// caches are flushed. (a.k.a `TOP_OF_PIPE`)
-        None,
-        /// An execution and memory dependency.
-        ///
-        /// All `stage`s must complete before the mask is satisfied, and
-        /// additionally all memory types specified in `access` from all
-        /// applicable `stage`s are flushed to memory.
-        ///
-        /// Only writes are allowed here, since flushing caches for read-only
-        /// memory is a nonsensical operation.
-        StageAccess(StageAccess<WriteAccess>),
-    }
-    impl MemoryCondition {
-        /// Convert into a stage flags and access flags pair.
-        pub fn into_stage_access(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
-            match self {
-                // Definitionally equivalent to `BOTTOM_OF_PIPE` when `access ==
-                // NONE`.
-                Self::All(access) => (vk::PipelineStageFlags::ALL_COMMANDS, access.0),
-                Self::None => (
-                    // Waiting until the top of pipe implies all commands have
-                    // been submitted, which is instantly.
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    // Pseudo-stages do not access memory and thus cannot flush.
-                    vk::AccessFlags::empty(),
-                ),
-                Self::StageAccess(sa) => sa.into_stage_access(),
-            }
-        }
-    }
-    impl From<StageAccess<WriteAccess>> for MemoryCondition {
-        fn from(value: StageAccess<WriteAccess>) -> Self {
-            Self::StageAccess(value)
-        }
-    }
-    /// An execution block on some condition, and which caches need to be
-    /// invalidated before continuing.
-    #[derive(Clone, Copy)]
-    pub enum MemoryBlock {
-        /// An execution dependency on all future commands. (a.k.a `TOP_OF_PIPE`
-        /// or `ALL_COMMANDS`, depending on whether the access is empty or not.)
-        All(ReadWriteAccess),
-        /// No dependency, do not block anything and do not invalidate any
-        /// caches. (a.k.a `BOTTOM_OF_PIPE`)
-        None,
-        /// An execution and memory dependency.
-        ///
-        /// All `stage`s must wait before until the event is satisfied, and
-        /// additionally all memory types specified in `access` from all
-        /// applicable `stage`s are invalidated and fetched from memory.
-        StageAccess(StageAccess<ReadWriteAccess>),
-    }
-    impl From<StageAccess<ReadWriteAccess>> for MemoryBlock {
-        fn from(value: StageAccess<ReadWriteAccess>) -> Self {
-            Self::StageAccess(value)
-        }
-    }
-    impl MemoryBlock {
-        /// Convert into a stage flags and access flags pair.
-        pub fn into_stage_access(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
-            match self {
-                // Definitionally equivalent to `TOP_OF_PIPE` when `access ==
-                // NONE`.
-                Self::All(access) => (vk::PipelineStageFlags::ALL_COMMANDS, access.0),
-                Self::None => (
-                    // Blocking the bottom of pipe implies commands can do
-                    // literally all of their work before blocking.
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    // Pseudo-stages do not access memory and thus cannot
-                    // invalidate.
-                    vk::AccessFlags::empty(),
-                ),
-                Self::StageAccess(sa) => sa.into_stage_access(),
-            }
-        }
-    }
-
-    /// A combination of one or more PipelineStages, not including the
-    /// `TOP_OF_PIPE`, `BOTTOM_OF_PIPE` and `ALL_COMMANDS` pseudo-stages. For
-    /// those stages, see the `All` and `None` variants of [`ExecutionBlock`]
-    /// and [`ExecutionCondition`].
-    #[derive(Copy, Clone)]
-    pub struct PipelineStages(core::num::NonZero<u32>);
-    impl PipelineStages {
-        pub const DRAW_INDIRECT: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::DRAW_INDIRECT.as_raw()).unwrap());
-        pub const VERTEX_INPUT: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::VERTEX_INPUT.as_raw()).unwrap());
-        pub const VERTEX_SHADER: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::VERTEX_SHADER.as_raw()).unwrap());
-        pub const TESS_CONTROL_SHADER: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::TESSELLATION_CONTROL_SHADER.as_raw())
-                .unwrap(),
-        );
-        pub const TESS_EVALUATION_SHADER: Self = Self(
-            core::num::NonZero::new(
-                vk::PipelineStageFlags::TESSELLATION_EVALUATION_SHADER.as_raw(),
-            )
-            .unwrap(),
-        );
-        pub const GEOMETRY_SHADER: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::GEOMETRY_SHADER.as_raw()).unwrap(),
-        );
-        pub const FRAGMENT_SHADER: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::FRAGMENT_SHADER.as_raw()).unwrap(),
-        );
-        pub const EARLY_FRAGMENT_TESTS: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS.as_raw()).unwrap(),
-        );
-        pub const LATE_FRAGMENT_TESTS: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS.as_raw()).unwrap(),
-        );
-        pub const COLOR_ATTACHMENT_OUTPUT: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.as_raw())
-                .unwrap(),
-        );
-        pub const COMPUTE_SHADER: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::COMPUTE_SHADER.as_raw()).unwrap());
-        pub const TRANSFER: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::TRANSFER.as_raw()).unwrap());
-        // This is the final remaining psuedostage, that hasn't been abstracted
-        // away, and i do not know the implications of including it here.
-        pub const HOST: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::HOST.as_raw()).unwrap());
-        /// All parts of the graphics pipeline, including future extensions.
-        pub const ALL_GRAPHICS: Self =
-            Self(core::num::NonZero::new(vk::PipelineStageFlags::ALL_GRAPHICS.as_raw()).unwrap());
-        /// `EXT_mesh_shader`
-        pub const TASK_SHADER: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::TASK_SHADER_EXT.as_raw()).unwrap(),
-        );
-        /// `EXT_mesh_shader`
-        pub const MESH_SHADER: Self = Self(
-            core::num::NonZero::new(vk::PipelineStageFlags::MESH_SHADER_EXT.as_raw()).unwrap(),
-        );
-    }
-    impl PipelineStages {
-        pub fn into_flags(self) -> vk::PipelineStageFlags {
-            vk::PipelineStageFlags::from_raw(self.0.get())
-        }
-    }
-    /// Implements BitOr on a copy type which is a newtype over an implementor
-    /// of BitOr.
-    macro_rules! newtype_bitor {
-        ($ty:ty) => {
-            // T | T
-            impl ::core::ops::BitOr<$ty> for $ty {
-                type Output = $ty;
-                fn bitor(self, other: $ty) -> Self::Output {
-                    Self::Output {
-                        0: self.0 | other.0,
-                    }
-                }
-            }
-            // &T | T
-            impl ::core::ops::BitOr<&$ty> for $ty {
-                type Output = $ty;
-                fn bitor(self, other: &$ty) -> Self::Output {
-                    Self::Output {
-                        0: self.0 | other.0,
-                    }
-                }
-            }
-            // T | &T
-            impl ::core::ops::BitOr<$ty> for &$ty {
-                type Output = $ty;
-                fn bitor(self, other: $ty) -> Self::Output {
-                    Self::Output {
-                        0: self.0 | other.0,
-                    }
-                }
-            }
-            // &T | &T
-            impl ::core::ops::BitOr<&$ty> for &$ty {
-                type Output = $ty;
-                fn bitor(self, other: &$ty) -> Self::Output {
-                    Self::Output {
-                        0: self.0 | other.0,
-                    }
-                }
+    pub struct NonZeroStageFlags(core::num::NonZero<u32>);
+    macro_rules! nonzero_stages {
+        {$($name:ident,)+} => {
+            impl NonZeroStageFlags {
+                $(const $name : Self = Self(::core::num::NonZero::new(::ash::vk::PipelineStageFlags::$name.as_raw()).unwrap());)+
             }
         };
     }
-    newtype_bitor!(PipelineStages);
-
+    nonzero_stages! {
+        TOP_OF_PIPE,
+        DRAW_INDIRECT,
+        VERTEX_INPUT,
+        VERTEX_SHADER,
+        TESSELLATION_CONTROL_SHADER,
+        TESSELLATION_EVALUATION_SHADER,
+        GEOMETRY_SHADER,
+        FRAGMENT_SHADER,
+        EARLY_FRAGMENT_TESTS,
+        LATE_FRAGMENT_TESTS,
+        COLOR_ATTACHMENT_OUTPUT,
+        COMPUTE_SHADER,
+        TRANSFER,
+        BOTTOM_OF_PIPE,
+        HOST,
+        ALL_GRAPHICS,
+        ALL_COMMANDS,
+    }
+    impl NonZeroStageFlags {
+        pub fn get(self) -> vk::PipelineStageFlags {
+            vk::PipelineStageFlags::from_raw(self.0.get())
+        }
+    }
+    impl core::ops::BitOr for NonZeroStageFlags {
+        type Output = Self;
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+    /// Structure defining a set of pipeline stages and some or all of the
+    /// writes they perform, used as the start of a barrier operation.
+    ///
+    /// This type holds a subset of the accesses available to [`ReadWrite`], and
+    /// can be trivially converted using [`Into::into()`].
+    ///
+    /// Write barriers can be combined using the `|` operator.
     #[derive(Copy, Clone)]
-    #[repr(transparent)]
-    pub struct ReadWriteAccess(vk::AccessFlags);
-    impl ReadWriteAccess {
-        pub const INDIRECT_COMMAND_READ: Self = Self(vk::AccessFlags::INDIRECT_COMMAND_READ);
-        pub const INDEX_READ: Self = Self(vk::AccessFlags::INDEX_READ);
-        pub const VERTEX_ATTRIBUTE_READ: Self = Self(vk::AccessFlags::VERTEX_ATTRIBUTE_READ);
-        pub const UNIFORM_READ: Self = Self(vk::AccessFlags::UNIFORM_READ);
-        pub const INPUT_ATTACHMENT_READ: Self = Self(vk::AccessFlags::INPUT_ATTACHMENT_READ);
-        pub const SHADER_READ: Self = Self(vk::AccessFlags::SHADER_READ);
-        pub const COLOR_ATTACHMENT_READ: Self = Self(vk::AccessFlags::COLOR_ATTACHMENT_READ);
-        pub const DEPTH_STENCIL_ATTACHMENT_READ: Self =
-            Self(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ);
-        pub const TRANSFER_READ: Self = Self(vk::AccessFlags::TRANSFER_READ);
-        pub const HOST_READ: Self = Self(vk::AccessFlags::HOST_READ);
-        /// Equivalent to *every* read applicable to *every* stage this access
-        /// is used with. Always valid to use for any stage, even those that
-        /// perform no reads.
-        pub const MEMORY_READ: Self = Self(vk::AccessFlags::MEMORY_READ);
-
-        pub const SHADER_WRITE: Self = Self(WriteAccess::SHADER_WRITE.0);
-        pub const COLOR_ATTACHMENT_WRITE: Self = Self(WriteAccess::COLOR_ATTACHMENT_WRITE.0);
-        pub const DEPTH_STENCIL_ATTACHMENT_WRITE: Self =
-            Self(WriteAccess::DEPTH_STENCIL_ATTACHMENT_WRITE.0);
-        pub const TRANSFER_WRITE: Self = Self(WriteAccess::TRANSFER_WRITE.0);
-        pub const HOST_WRITE: Self = Self(WriteAccess::HOST_WRITE.0);
-        /// Equivalent to *every* write applicable to *every* stage this access
-        /// is used with. Always valid to use for any stage, even those that
-        /// perform no writes.
-        pub const MEMORY_WRITE: Self = Self(WriteAccess::MEMORY_WRITE.0);
-
-        // Common combinations:
-        /// `SHADER_READ | SHADER_WRITE`
-        pub const SHADER_READ_WRITE: Self = Self(vk::AccessFlags::from_raw(
-            Self::SHADER_READ.0.as_raw() | Self::SHADER_WRITE.0.as_raw(),
-        ));
+    pub struct Write {
+        stage: NonZeroStageFlags,
+        access: vk::AccessFlags,
     }
-    impl From<WriteAccess> for ReadWriteAccess {
-        fn from(value: WriteAccess) -> Self {
-            // Every write access is a readwrite access, of course!
-            Self(value.0)
+    impl Write {
+        /// Don't wait for any executions to complete and don't flush any access
+        /// caches.
+        #[doc(alias = "TOP_OF_PIPE")]
+        pub const NOTHING: Self = Self {
+            stage: NonZeroStageFlags::TOP_OF_PIPE,
+            access: vk::AccessFlags::empty(),
+        };
+        pub fn stages(self) -> vk::PipelineStageFlags {
+            self.stage.get()
+        }
+        pub fn accesses(self) -> vk::AccessFlags {
+            self.access
+        }
+        pub fn into_stage_access(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
+            (self.stages(), self.accesses())
         }
     }
-    newtype_bitor!(ReadWriteAccess);
-    impl AccessFlags for ReadWriteAccess {
-        const NONE: Self = Self(vk::AccessFlags::empty());
-        fn into_flags(self) -> vk::AccessFlags {
-            self.0
+    impl core::ops::BitOr for Write {
+        type Output = Write;
+        fn bitor(self, rhs: Write) -> Write {
+            Write {
+                stage: self.stage | rhs.stage,
+                access: self.access | rhs.access,
+            }
         }
     }
-
-    /// Access flags that do not contain any reads
+    impl core::ops::BitOr<ReadWrite> for Write {
+        type Output = ReadWrite;
+        fn bitor(self, rhs: ReadWrite) -> ReadWrite {
+            ReadWrite {
+                stage: self.stage | rhs.stage,
+                access: self.access | rhs.access,
+            }
+        }
+    }
+    impl core::ops::BitOr<Write> for ReadWrite {
+        type Output = ReadWrite;
+        fn bitor(self, rhs: Write) -> ReadWrite {
+            ReadWrite {
+                stage: self.stage | rhs.stage,
+                access: self.access | rhs.access,
+            }
+        }
+    }
+    impl core::ops::BitOr for ReadWrite {
+        type Output = ReadWrite;
+        fn bitor(self, rhs: ReadWrite) -> ReadWrite {
+            ReadWrite {
+                stage: self.stage | rhs.stage,
+                access: self.access | rhs.access,
+            }
+        }
+    }
+    /// Structure defining a set of pipeline stages and some or all of the reads
+    /// and writes they perform, used as the end of a barrier operation.
+    ///
+    /// This type holds a superset of the accesses available to [`Write`] and
+    /// can be trivially converted using [`From::from()`].
+    ///
+    /// ReadWrite barriers can be combined using the `|` operator.
     #[derive(Copy, Clone)]
-    #[repr(transparent)]
-    pub struct WriteAccess(vk::AccessFlags);
-    impl WriteAccess {
-        pub const SHADER_WRITE: Self = Self(vk::AccessFlags::SHADER_WRITE);
-        pub const COLOR_ATTACHMENT_WRITE: Self = Self(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-        pub const DEPTH_STENCIL_ATTACHMENT_WRITE: Self =
-            Self(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
-        pub const TRANSFER_WRITE: Self = Self(vk::AccessFlags::TRANSFER_WRITE);
-        pub const HOST_WRITE: Self = Self(vk::AccessFlags::HOST_WRITE);
-        /// Equivalent to *every* write applicable to *every* stage this access
-        /// is used with. Always valid to use for any stage.
-        pub const MEMORY_WRITE: Self = Self(vk::AccessFlags::MEMORY_WRITE);
+    pub struct ReadWrite {
+        stage: NonZeroStageFlags,
+        access: vk::AccessFlags,
     }
-    newtype_bitor!(WriteAccess);
-    impl AccessFlags for WriteAccess {
-        const NONE: Self = Self(vk::AccessFlags::empty());
-        fn into_flags(self) -> vk::AccessFlags {
-            self.0
+    /// Since [`ReadWrite`] is a superset of [`Write`], it is trivially sound to
+    /// convert.
+    impl From<Write> for ReadWrite {
+        fn from(value: Write) -> Self {
+            Self {
+                stage: value.stage,
+                access: value.access,
+            }
         }
+    }
+    impl ReadWrite {
+        /// Don't block the execution of any stages and don't invalidate any
+        /// access caches.
+        #[doc(alias = "BOTTOM_OF_PIPE")]
+        pub const NOTHING: Self = Self {
+            stage: NonZeroStageFlags::BOTTOM_OF_PIPE,
+            access: vk::AccessFlags::empty(),
+        };
+        pub fn stages(self) -> vk::PipelineStageFlags {
+            self.stage.get()
+        }
+        pub fn accesses(self) -> vk::AccessFlags {
+            self.access
+        }
+        pub fn into_stage_access(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
+            (self.stages(), self.accesses())
+        }
+    }
+    pub trait PipelineStage {
+        const STAGE: NonZeroStageFlags;
+        /// Block on execution and all write operations it may perform.
+        const ALL_WRITE: Write;
+        /// Block on execution and all read operations it may perform.
+        const ALL_READ: ReadWrite;
+        /// Block on execution and all read or write operations it may perform.
+        const ALL_READ_WRITE: ReadWrite = ReadWrite {
+            stage: NonZeroStageFlags(
+                core::num::NonZero::new(
+                    Self::ALL_WRITE.stage.0.get() | Self::ALL_READ.stage.0.get(),
+                )
+                .unwrap(),
+            ),
+            access: vk::AccessFlags::from_raw(
+                Self::ALL_WRITE.access.as_raw() | Self::ALL_READ.access.as_raw(),
+            ),
+        };
+        /// Block on execution of this stage, not flushing or invalidating any
+        /// access caches.
+        const EXECUTE: Write = Write {
+            stage: Self::STAGE,
+            access: vk::AccessFlags::empty(),
+        };
+    }
+    macro_rules! stage_accesses {
+        {$($stage:ident: $nonzero_stage:ident {
+            reads: {
+                $($(#[$read_meta:meta])*$read_access_name:ident: $read_access_raw:ident,)*
+            },
+            writes: {
+                $($(#[$write_meta:meta])*$write_access_name:ident: $write_access_raw:ident,)*
+            },
+        },)+} => {
+            $(
+                pub struct $stage;
+                impl $stage {
+                    $(
+                        $(#[$read_meta])*
+                        pub const $read_access_name: ReadWrite = ReadWrite {
+                            stage: <$stage as PipelineStage>::STAGE,
+                            access: ::ash::vk::AccessFlags::$read_access_raw,
+                        };
+                    )*
+                    $(
+                        $(#[$write_meta])*
+                        pub const $write_access_name: Write = Write {
+                            stage: <$stage as PipelineStage>::STAGE,
+                            access: ::ash::vk::AccessFlags::$write_access_raw,
+                        };
+                    )*
+                }
+                impl PipelineStage for $stage {
+                    const STAGE: NonZeroStageFlags = NonZeroStageFlags::$nonzero_stage;
+                    const ALL_WRITE: Write = Write {
+                        stage: Self::STAGE,
+                        access: ::ash::vk::AccessFlags::from_raw(0 $(| ::ash::vk::AccessFlags::$write_access_raw.as_raw())*),
+                    };
+                    const ALL_READ: ReadWrite = ReadWrite {
+                        stage: Self::STAGE,
+                        access: ::ash::vk::AccessFlags::from_raw(0 $(| ::ash::vk::AccessFlags::$read_access_raw.as_raw())*),
+                    };
+                }
+            )+
+        };
+    }
+    stage_accesses! {
+        DrawIndirect: DRAW_INDIRECT {
+            reads: {COMMAND_READ: INDIRECT_COMMAND_READ,},
+            writes: {},
+        },
+        VertexInput: VERTEX_INPUT {
+            reads: {
+                ATTRIBUTE_READ: VERTEX_ATTRIBUTE_READ,
+                INDEX_READ: INDEX_READ,
+            },
+            writes: {},
+        },
+        VertexShader: VERTEX_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        TessControlShader: TESSELLATION_CONTROL_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        TessEvalShader: TESSELLATION_EVALUATION_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        GeometryShader: GEOMETRY_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        FragmentShader: FRAGMENT_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ, INPUT_ATTACHMENT_READ: INPUT_ATTACHMENT_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        EarlyFragmentTests: EARLY_FRAGMENT_TESTS {
+            reads: {DEPTH_STENCIL_READ: DEPTH_STENCIL_ATTACHMENT_READ,},
+            writes: {DEPTH_STENCIL_WRITE: DEPTH_STENCIL_ATTACHMENT_WRITE,},
+        },
+        LateFragmentTests: LATE_FRAGMENT_TESTS {
+            reads: {DEPTH_STENCIL_READ: DEPTH_STENCIL_ATTACHMENT_READ,},
+            writes: {DEPTH_STENCIL_WRITE: DEPTH_STENCIL_ATTACHMENT_WRITE,},
+        },
+        ColorOutput: COLOR_ATTACHMENT_OUTPUT {
+            reads: {READ: COLOR_ATTACHMENT_READ,},
+            writes: {WRITE: COLOR_ATTACHMENT_WRITE,},
+        },
+        ComputeShader: COMPUTE_SHADER {
+            reads: {READ: SHADER_READ, UNIFORM_READ: UNIFORM_READ,},
+            writes: {WRITE: SHADER_WRITE,},
+        },
+        Transfer: TRANSFER {
+            reads: {READ: TRANSFER_READ,},
+            writes: {WRITE: TRANSFER_WRITE,},
+        },
+        Host: HOST {
+            reads: {
+                /// Reads through host memory-mapped regions.
+                READ: HOST_READ,
+            },
+            writes: {
+                /// Writes through host memory-mapped regions.
+                WRITE: HOST_WRITE,
+            },
+        },
     }
 }
 
@@ -570,7 +459,7 @@ impl Semaphore<Pending> {
     /// Construct a wait operation. When passed into a queue submission
     /// operation, the device will wait for this semaphore to be signaled before
     /// any of the stages set in `wait_stage` can begin executing.
-    pub fn into_wait(self, wait_stage: barrier::PipelineStages) -> WaitSemaphore {
+    pub fn into_wait(self, wait_stage: barrier::NonZeroStageFlags) -> WaitSemaphore {
         WaitSemaphore {
             semaphore: self,
             wait_stage,
@@ -643,5 +532,5 @@ impl Semaphore<Waiting> {
 pub struct WaitSemaphore {
     pub semaphore: Semaphore<Pending>,
     /// These stages must wait before beginning execution.
-    pub wait_stage: barrier::PipelineStages,
+    pub wait_stage: barrier::NonZeroStageFlags,
 }

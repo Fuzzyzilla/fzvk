@@ -552,17 +552,6 @@ pub fn main() -> Result<()> {
         let reference_image_ref = reference_image.discard_layout();
         let pingpong_image_ref = pingpong_array.discard_layout();
 
-        // Barrier building blocks that we'll be using a lot! Specifies a wait
-        // until all previous compute shaders have finished and flushes their
-        // writes to any storage.
-        let wait_compute_write =
-            barrier::StageAccess::shader_access::<Compute>(barrier::WriteAccess::SHADER_WRITE);
-        // Specifies a block on all future compute shaders and invalidates their
-        // storage caches for reads and writes.
-        let block_compute_read_write = barrier::StageAccess::shader_access::<Compute>(
-            barrier::ReadWriteAccess::SHADER_READ_WRITE,
-        );
-
         // Immediately transition our reference image to transfer dst layout,
         // before the transfer occurs. FIXME: allow multiple transitions per
         // barrier.
@@ -570,14 +559,10 @@ pub fn main() -> Result<()> {
             // Transition the images from Undefined -> The formats we need.
             .barrier(
                 &mut recording,
-                barrier::MemoryCondition::None,
+                barrier::Write::NOTHING,
                 // Block transfer from occuring until the image is in the right
                 // layout to accept it.
-                barrier::StageAccess::from_stage_access(
-                    barrier::PipelineStages::TRANSFER,
-                    barrier::ReadWriteAccess::TRANSFER_WRITE,
-                )
-                .into(),
+                barrier::Transfer::WRITE,
                 [],
                 reference_image_ref.reinitialize_as(layout::TransferDst),
             );
@@ -585,23 +570,16 @@ pub fn main() -> Result<()> {
         // the shader writes to it.
         let pingpong_image_ref = device.barrier(
             &mut recording,
-            barrier::MemoryCondition::None,
-            barrier::StageAccess::shader_access::<Compute>(barrier::ReadWriteAccess::SHADER_WRITE)
-                .into(),
+            barrier::Write::NOTHING,
+            barrier::ComputeShader::WRITE,
             [buffer.barrier()],
             pingpong_image_ref.reinitialize_as(layout::General),
         );
         // Block transfer until the buffer is updated by the host.
         device.barrier(
             &mut recording,
-            barrier::MemoryCondition::StageAccess(barrier::StageAccess::from_stage_access(
-                barrier::PipelineStages::HOST,
-                barrier::WriteAccess::HOST_WRITE,
-            )),
-            barrier::MemoryBlock::StageAccess(barrier::StageAccess::from_stage_access(
-                barrier::PipelineStages::TRANSFER,
-                barrier::ReadWriteAccess::TRANSFER_READ,
-            )),
+            barrier::Host::WRITE,
+            barrier::Transfer::READ,
             [buffer.barrier()],
             (),
         );
@@ -624,12 +602,8 @@ pub fn main() -> Result<()> {
             // Wait until import transfer is complete...
             .barrier(
                 &mut recording,
-                barrier::StageAccess::from_stage_access(
-                    barrier::PipelineStages::TRANSFER,
-                    barrier::WriteAccess::TRANSFER_WRITE,
-                )
-                .into(),
-                block_compute_read_write.into(),
+                barrier::Transfer::WRITE,
+                barrier::ComputeShader::READ | barrier::ComputeShader::WRITE,
                 [],
                 reference_image_ref.transition(layout::General),
             );
@@ -709,8 +683,8 @@ pub fn main() -> Result<()> {
                 // next...
                 .barrier(
                     &mut recording,
-                    wait_compute_write.into(),
-                    block_compute_read_write.into(),
+                    barrier::ComputeShader::WRITE,
+                    barrier::ComputeShader::READ | barrier::ComputeShader::WRITE,
                     [],
                     (),
                 );
@@ -724,12 +698,8 @@ pub fn main() -> Result<()> {
         // Export the final image back to the host buffer
         let _pingpong_image_ref = device.barrier(
             &mut recording,
-            wait_compute_write.into(),
-            barrier::StageAccess::from_stage_access(
-                barrier::PipelineStages::TRANSFER,
-                barrier::ReadWriteAccess::TRANSFER_READ,
-            )
-            .into(),
+            barrier::ComputeShader::WRITE,
+            barrier::Transfer::READ,
             [],
             // FIXME: we only actually need to transition
             // pingpong_array[readbuf].

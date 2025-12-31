@@ -546,9 +546,7 @@ impl<'device> Device<'device> {
                             .map(|wait| wait.semaphore.handle()),
                     )
                     .wait_dst_stage_mask(
-                        &wait_semaphores
-                            .each_ref()
-                            .map(|wait| wait.wait_stage.into_flags()),
+                        &wait_semaphores.each_ref().map(|wait| wait.wait_stage.get()),
                     )
                     .command_buffers(ThinHandle::handles_of(buffers))
                     .signal_semaphores(ThinHandle::handles_of(&signal_semaphores))],
@@ -1320,13 +1318,13 @@ impl<'device> Device<'device> {
     >(
         &'a self,
         buffer: &'_ mut RecordingBuffer<Level, OutsideRender>,
-        wait_for: barrier::MemoryCondition,
-        block: barrier::MemoryBlock,
+        wait_for: barrier::Write,
+        block: impl Into<barrier::ReadWrite>,
         buffer_barriers: [BufferBarrier<'_>; BUFFER_BARRIERS],
         image_transitions: ImageTransitions,
     ) -> ImageTransitions::AfterTransition<'images> {
         let (src_stage, src_access) = wait_for.into_stage_access();
-        let (dst_stage, dst_access) = block.into_stage_access();
+        let (dst_stage, dst_access) = block.into().into_stage_access();
         self.0.cmd_pipeline_barrier(
             buffer.handle(),
             src_stage,

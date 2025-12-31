@@ -26,6 +26,8 @@ pub unsafe trait StaticSpirV: Sized {
     type Specialization: Specialization;
     /// The words of SPIR-V Source code.
     const SPIRV: &'static [u32];
+    /// The (major, minor) version of SPIR-V.
+    const VERSION: (u8, u8);
 }
 
 crate::thin_handle! {
@@ -89,59 +91,46 @@ crate::thin_handle! {
 
 /// The stage of a pipeline a shader is for.
 pub trait ShaderStage: Copy {
-    const FLAG: vk::ShaderStageFlags;
-    const PIPE_STAGE: sync::barrier::PipelineStages;
+    const STAGE_FLAG: vk::ShaderStageFlags;
 }
 impl ShaderStage for Vertex {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
-    const PIPE_STAGE: sync::barrier::PipelineStages = sync::barrier::PipelineStages::VERTEX_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
 }
 #[derive(Clone, Copy)]
 pub struct Geometry;
 impl ShaderStage for Geometry {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::GEOMETRY;
-    const PIPE_STAGE: sync::barrier::PipelineStages =
-        sync::barrier::PipelineStages::GEOMETRY_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::GEOMETRY;
 }
 #[derive(Clone, Copy)]
 pub struct TessControl;
 impl ShaderStage for TessControl {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_CONTROL;
-    const PIPE_STAGE: sync::barrier::PipelineStages =
-        sync::barrier::PipelineStages::TESS_CONTROL_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_CONTROL;
 }
 #[derive(Clone, Copy)]
 pub struct TessEvaluation;
 impl ShaderStage for TessEvaluation {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_EVALUATION;
-    const PIPE_STAGE: sync::barrier::PipelineStages =
-        sync::barrier::PipelineStages::TESS_EVALUATION_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TESSELLATION_EVALUATION;
 }
 
 #[derive(Clone, Copy)]
 pub struct TaskEXT;
 impl ShaderStage for TaskEXT {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TASK_EXT;
-    const PIPE_STAGE: sync::barrier::PipelineStages = sync::barrier::PipelineStages::TASK_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::TASK_EXT;
 }
 #[derive(Clone, Copy)]
 pub struct MeshEXT;
 impl ShaderStage for MeshEXT {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::MESH_EXT;
-    const PIPE_STAGE: sync::barrier::PipelineStages = sync::barrier::PipelineStages::MESH_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::MESH_EXT;
 }
 #[derive(Clone, Copy)]
 pub struct Fragment;
 impl ShaderStage for Fragment {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
-    const PIPE_STAGE: sync::barrier::PipelineStages =
-        sync::barrier::PipelineStages::FRAGMENT_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 }
 #[derive(Clone, Copy)]
 pub struct Compute;
 impl ShaderStage for Compute {
-    const FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
-    const PIPE_STAGE: sync::barrier::PipelineStages = sync::barrier::PipelineStages::COMPUTE_SHADER;
+    const STAGE_FLAG: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 }
 
 impl DynamicShaderModule {
@@ -252,7 +241,7 @@ impl<'a, Stage: ShaderStage> SpecializedEntry<'a, Stage> {
         vk::PipelineShaderStageCreateInfo::default()
             .module(self.module)
             .name(self.entry)
-            .stage(Stage::FLAG)
+            .stage(Stage::STAGE_FLAG)
             .specialization_info(self.specialization_info())
     }
 }
