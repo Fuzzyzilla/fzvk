@@ -1,6 +1,6 @@
 const _: () = {
     fzvk_shader::glsl! {
-        file: "fzvk/examples/shader.glsl",
+        file: "shader.glsl",
         defines: {
             should_be_defined,
             should_be_true: true,

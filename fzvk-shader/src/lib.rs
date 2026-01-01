@@ -1366,18 +1366,31 @@ fn run_settings(settings: CompilationSettings) -> TokenStream {
             settings.source_span.file(),
             settings.source_span.line() - 1,
         ),
-        Source::File(path) => (
-            // FIXME: what should the root path of this relative path be,
-            // ideally?
-
-            //FIXME: This makes our macro incredibly non-pure, a big nono. But
-            // there's no solution to this atm. See:
-            // https://github.com/rust-lang/rust/issues/99515
-            std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| proc_macro_error::abort_call_site!(err)),
-            path.to_string_lossy().into_owned(),
-            0,
-        ),
+        Source::File(path) => {
+            let path_name = path.to_string_lossy().into_owned();
+            // Match behavior of include_bytes!, where path is relative to the
+            // folder of the file containing the invocation.
+            let mut invocation_path = proc_macro::Span::call_site().local_file().unwrap();
+            // Parent directory.
+            invocation_path.pop();
+            // Append, or replace if the path is absolute.
+            let path = invocation_path.join(&path);
+            (
+                // FIXME: This makes our macro incredibly non-pure, a big nono.
+                // But there's no solution to this atm. See:
+                // https://github.com/rust-lang/rust/issues/99515. Possible hack
+                // is to emit a discarded include_bytes! in the output, creating
+                // a dependency on that external file.
+                std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                    proc_macro_error::abort!(
+                        settings.source_span,
+                        format!("{err} while trying to open {path:?}")
+                    )
+                }),
+                path_name,
+                0,
+            )
+        }
     };
     let compiler = shaderc::Compiler::new().unwrap();
     let mut options = shaderc::CompileOptions::new().unwrap();
