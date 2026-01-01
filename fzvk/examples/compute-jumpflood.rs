@@ -18,12 +18,13 @@ fn todo<T>() -> T {
 
 mod import {
     fzvk_shader::glsl! {
-        r#"#version 460 core
+        r#"
+        #version 460 core
         #extension GL_EXT_shader_explicit_arithmetic_types_int32: require
         #pragma shader_stage(compute)
         
         layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-
+        
         layout(set = 0, binding = 0, r8ui) uniform restrict readonly uimage2D reference;
         layout(set = 1, binding = 0, rg16ui) uniform restrict writeonly uimage2D target;
 

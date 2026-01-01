@@ -5,7 +5,7 @@
 //! fields of the tuple:
 //! ```ignore
 //! struct MyDescriptorSet (
-//!     StorageBuffer, // self.0 == binding 0
+//!     StorageBuffer, // self.0 == binding 0, equivalent to an array of 1.
 //!     [<arbitrary>; 0], // .1 == binding 1, see note below~
 //!     [CombinedImageSampler; 2], // .2 == binding 2
 //! )
@@ -62,6 +62,80 @@ pub struct DynamicUniformBuffer;
 impl DescriptorType for DynamicUniformBuffer {
     const TYPE: vk::DescriptorType = vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC;
 }
+
+pub trait FormatRequirement {}
+/// Format requirement allowing any color format.
+pub struct AnyColor;
+impl FormatRequirement for AnyColor {}
+/// Format requirement allowing any depth format.
+pub struct AnyDepth;
+impl FormatRequirement for AnyDepth {}
+pub trait SatisfiesFormatRequirement<Format: FormatRequirement>: format::Format {}
+/// All color formats satisfy [`AnyColor`].
+impl<T: format::HasAspect<format::Color>> SatisfiesFormatRequirement<AnyColor> for T {}
+/// All depth formats satisfy [`AnyDepth`].
+impl<T: format::HasAspect<format::Depth>> SatisfiesFormatRequirement<AnyDepth> for T {}
+/// Formats of course satisfy themselves.
+impl<T: format::Format + FormatRequirement> SatisfiesFormatRequirement<T> for T {}
+
+macro_rules! image_formats {
+    ($($name:ident,)*) => {
+        $(impl FormatRequirement for crate::format::$name {})*
+    };
+}
+image_formats! {
+    A2B10G10R10_UINT_PACK32,
+    A2R10G10B10_UNORM_PACK32,
+    B10G11R11_UFLOAT_PACK32,
+
+    R8G8B8A8_SINT,
+    R8G8B8A8_SNORM,
+    R8G8B8A8_UINT,
+    R8G8B8A8_UNORM,
+
+    R8G8_SINT,
+    R8G8_SNORM,
+    R8G8_UINT,
+    R8G8_UNORM,
+
+    R8_SINT,
+    R8_SNORM,
+    R8_UINT,
+    R8_UNORM,
+
+    R16G16B16A16_SFLOAT,
+    R16G16B16A16_SINT,
+    R16G16B16A16_SNORM,
+    R16G16B16A16_UINT,
+    R16G16B16A16_UNORM,
+
+    R16G16_SFLOAT,
+    R16G16_SINT,
+    R16G16_SNORM,
+    R16G16_UINT,
+    R16G16_UNORM,
+
+    R16_SFLOAT,
+    R16_SINT,
+    R16_SNORM,
+    R16_UINT,
+    R16_UNORM,
+
+    R32G32B32A32_SFLOAT,
+    R32G32B32A32_SINT,
+    R32G32B32A32_UINT,
+
+    R32G32_SFLOAT,
+    R32G32_SINT,
+    R32G32_UINT,
+
+    R32_SFLOAT,
+    R32_SINT,
+    R32_UINT,
+    R64_SINT,
+    R64_UINT,
+}
+
 pub unsafe trait HasResource<Ty: DescriptorType> {}
 unsafe impl<Usage, Dim, Format, Samples> HasResource<StorageImage>
     for image::ImageView<Usage, Dim, Format, Samples>

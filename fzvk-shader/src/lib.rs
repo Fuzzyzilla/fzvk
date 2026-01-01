@@ -1,5 +1,46 @@
+//! # `fzvk-shader`
+//! Macros for compiling GLSL and HLSL shaders, generating types that provide
+//! compile-time `fzvk` validations and cross-language type checking.
+//!
+//! ### Simple
+//! ```rust,no_run
+//! fzvk_shader::glsl!{
+//!     r#"#version 460 core
+//!     // Stage specified using pragma:
+//!     #pragma shader_stage(compute)
+//!     void main {
+//!         //...
+//!     }
+//!     "#
+//! }
+//! ```
+//! ### Advanced
+//! ```rust,no_run
+//! fzvk_shader::glsl!{
+//!     // Specify a file to read the source code from, relative to workspace
+//!     // root.
+//!     file: "path/to/file.glsl",
+//!     // Specify a string literal containing source code.
+//!     source: "<some glsl source code>",
+//!     // Specify defines applied to the source code.
+//!     defines: {
+//!         // Arbitrary strings are allowed.
+//!         "hello": "world",
+//!         // So are literals. Quotes are name are optional
+//!         number_of_horses: 2,
+//!         // FIXME: not yet supported. use quotes around the value.
+//!         "number_if_antihorses": "-2",
+//!         // FIXME: not yet supported. use quotes around the value.
+//!         "radians_per_hour": "2.598",
+//!         "can_yippee": true,
+//!         // Define without value, equivalent to setting it to "".
+//!         defined,
+//!         // Undefine. Differs from "".
+//!         "nothing": None,
+//!     }
+//! }
+//! ```
 use convert_case::Casing;
-use std::marker::PhantomData;
 
 use proc_macro::{TokenStream, TokenTree};
 use rspirv::{
@@ -8,18 +49,415 @@ use rspirv::{
 };
 use rustc_hash::FxHashMap;
 
+fn spirv_image_format_to_fzvk_format_path(
+    format: spirv::ImageFormat,
+    depth_mode: DepthMode,
+) -> &'static str {
+    match depth_mode {
+        DepthMode::Unknown => unimplemented!(),
+        DepthMode::Depth if matches!(format, spirv::ImageFormat::Unknown) => {
+            "::fzvk::descriptor::AnyDepth"
+        }
+        DepthMode::NotDepth => {
+            use spirv::ImageFormat as Format;
+            match format {
+                Format::Unknown => "::fzvk::descriptor::AnyColor",
+
+                Format::Rgb10a2ui => "::fzvk::format::A2B10G10R10_UINT_PACK32",
+                Format::Rgb10A2 => "::fzvk::format::A2R10G10B10_UNORM_PACK32",
+                Format::R11fG11fB10f => "::fzvk::format::B10G11R11_UFLOAT_PACK32",
+
+                Format::Rgba8i => "::fzvk::format::R8G8B8A8_SINT",
+                Format::Rgba8Snorm => "::fzvk::format::R8G8B8A8_SNORM",
+                Format::Rgba8ui => "::fzvk::format::R8G8B8A8_UINT",
+                Format::Rgba8 => "::fzvk::format::R8G8B8A8_UNORM",
+
+                Format::Rg8i => "::fzvk::format::R8G8_SINT",
+                Format::Rg8Snorm => "::fzvk::format::R8G8_SNORM",
+                Format::Rg8ui => "::fzvk::format::R8G8_UINT",
+                Format::Rg8 => "::fzvk::format::R8G8_UNORM",
+
+                Format::R8i => "::fzvk::format::R8_SINT",
+                Format::R8Snorm => "::fzvk::format::R8_SNORM",
+                Format::R8ui => "::fzvk::format::R8_UINT",
+                Format::R8 => "::fzvk::format::R8_UNORM",
+
+                Format::Rgba16f => "::fzvk::format::R16G16B16A16_SFLOAT",
+                Format::Rgba16i => "::fzvk::format::R16G16B16A16_SINT",
+                Format::Rgba16Snorm => "::fzvk::format::R16G16B16A16_SNORM",
+                Format::Rgba16ui => "::fzvk::format::R16G16B16A16_UINT",
+                Format::Rgba16 => "::fzvk::format::R16G16B16A16_UNORM",
+
+                Format::Rg16f => "::fzvk::format::R16G16_SFLOAT",
+                Format::Rg16i => "::fzvk::format::R16G16_SINT",
+                Format::Rg16Snorm => "::fzvk::format::R16G16_SNORM",
+                Format::Rg16ui => "::fzvk::format::R16G16_UINT",
+                Format::Rg16 => "::fzvk::format::R16G16_UNORM",
+
+                Format::R16f => "::fzvk::format::R16_SFLOAT",
+                Format::R16i => "::fzvk::format::R16_SINT",
+                Format::R16Snorm => "::fzvk::format::R16_SNORM",
+                Format::R16ui => "::fzvk::format::R16_UINT",
+                Format::R16 => "::fzvk::format::R16_UNORM",
+
+                Format::Rgba32f => "::fzvk::format::R32G32B32A32_SFLOAT",
+                Format::Rgba32i => "::fzvk::format::R32G32B32A32_SINT",
+                Format::Rgba32ui => "::fzvk::format::R32G32B32A32_UINT",
+
+                Format::Rg32f => "::fzvk::format::R32G32_SFLOAT",
+                Format::Rg32i => "::fzvk::format::R32G32_SINT",
+                Format::Rg32ui => "::fzvk::format::R32G32_UINT",
+
+                Format::R32f => {
+                    "
+                ::fzvk::format::R32_SFLOAT"
+                }
+                Format::R32i => "::fzvk::format::R32_SINT",
+                Format::R32ui => "::fzvk::format::R32_UINT",
+
+                Format::R64i => "::fzvk::format::R64_SINT",
+                Format::R64ui => "::fzvk::format::R64_UINT",
+            }
+        }
+
+        _ => unimplemented!(),
+    }
+}
+fn spirv_image_dimenstion_to_fzvk_dimension_path(dimension: ImageDimensionality) -> &'static str {
+    use ImageDimensionality as Dim;
+    match dimension {
+        Dim::D1 => "::fzvk::image::D1",
+        Dim::D1Array => "::fzvk::image::D1Array",
+        Dim::D2 => "::fzvk::image::D2",
+        Dim::D2Array => "::fzvk::image::D2Array",
+        Dim::D3 => "::fzvk::image::D3",
+        Dim::D3Array | Dim::Cube | Dim::CubeArray => unimplemented!(),
+    }
+}
+fn is_multisampled_to_fzvk_path(is_multisampled: bool) -> &'static str {
+    if is_multisampled {
+        "::fzvk::image::SingleSampled"
+    } else {
+        "::fzvk::image::MultiSampled"
+    }
+}
 enum Source {
     File(std::path::PathBuf),
     Literal(String),
 }
-
+fn parse_defines(
+    group: &proc_macro::Group,
+) -> Result<FxHashMap<String, Option<String>>, CompilationSettingsError> {
+    if !matches!(group.delimiter(), proc_macro::Delimiter::Brace) {
+        return Err(CompilationSettingsError {
+            error: "expected {",
+            span: group.span(),
+        });
+    }
+    let mut defines = FxHashMap::default();
+    let mut tokens = group.stream().into_iter().peekable();
+    loop {
+        let Some(name) = tokens.next() else {
+            break;
+        };
+        let name_str = match &name {
+            TokenTree::Ident(ident) => format!("{ident}"),
+            TokenTree::Literal(lit) => match litrs::Literal::from(lit) {
+                litrs::Literal::String(str) => str.value().to_owned(),
+                _ => {
+                    return Err(CompilationSettingsError {
+                        error: "expected a string literal or identifier",
+                        span: lit.span(),
+                    });
+                }
+            },
+            _ => {
+                return Err(CompilationSettingsError {
+                    error: "expected a string literal or identifier",
+                    span: name.span(),
+                });
+            }
+        };
+        let Some(delim) = tokens.next() else {
+            if defines.insert(name_str, Some(String::new())).is_some() {
+                return Err(CompilationSettingsError {
+                    error: "duplicate define",
+                    span: name.span(),
+                });
+            }
+            continue;
+        };
+        if is_punct(&delim, ':') {
+            let value = tokens.next().ok_or(CompilationSettingsError {
+                error: "expected value after delimeter",
+                span: delim.span(),
+            })?;
+            let value: Option<String> = match &value {
+                TokenTree::Ident(ident) => {
+                    let name = format!("{ident}");
+                    match name.as_str() {
+                        "true" => Some("true".to_owned()),
+                        "false" => Some("false".to_owned()),
+                        "None" => None,
+                        _ => {
+                            return Err(CompilationSettingsError {
+                                error: "unexpected ident",
+                                span: value.span(),
+                            });
+                        }
+                    }
+                }
+                TokenTree::Literal(lit) => Some(match litrs::Literal::from(lit) {
+                    // FIXME: never called. `true` is an ident.
+                    litrs::Literal::Bool(b) => b.as_str().to_owned(),
+                    litrs::Literal::Float(_f) => unimplemented!(),
+                    litrs::Literal::Integer(i) => format!("{}", i.value::<u128>().unwrap()),
+                    litrs::Literal::String(s) => s.value().to_owned(),
+                    litrs::Literal::Byte(b) => format!("{}", b.value().to_owned()),
+                    litrs::Literal::Char(_) | litrs::Literal::ByteString(_) => {
+                        return Err(CompilationSettingsError {
+                            error: "unsupported literal type",
+                            span: lit.span(),
+                        });
+                    }
+                }),
+                tok => {
+                    return Err(CompilationSettingsError {
+                        error: "unexpected token",
+                        span: tok.span(),
+                    });
+                }
+            };
+            if defines.insert(name_str, value).is_some() {
+                return Err(CompilationSettingsError {
+                    error: "duplicate define",
+                    span: name.span(),
+                });
+            }
+            let Some(comma) = tokens.next() else {
+                break;
+            };
+            if !is_punct(&comma, ',') {
+                return Err(CompilationSettingsError {
+                    error: "expected comma",
+                    span: comma.span(),
+                });
+            }
+        } else if is_punct(&delim, ',') {
+            if defines.insert(name_str, Some(String::new())).is_some() {
+                return Err(CompilationSettingsError {
+                    error: "duplicate define",
+                    span: name.span(),
+                });
+            }
+            continue;
+        }
+    }
+    Ok(defines)
+}
+fn is_punct(tree: &proc_macro::TokenTree, punct: char) -> bool {
+    matches!(tree, TokenTree::Punct(p) if p.as_char() == punct)
+}
+#[derive(Default)]
+struct PartialCompilationSettings {
+    target_spirv_version: Option<shaderc::SpirvVersion>,
+    target_environment_version: Option<shaderc::EnvVersion>,
+    stage: Option<shaderc::ShaderKind>,
+    source: Option<Source>,
+    source_span: Option<proc_macro::Span>,
+    language: Option<shaderc::SourceLanguage>,
+    defines: FxHashMap<String, Option<String>>,
+}
+impl PartialCompilationSettings {
+    fn key_value(
+        &mut self,
+        key: proc_macro::Ident,
+        value: TokenTree,
+    ) -> Result<(), CompilationSettingsError> {
+        let key_text = format!("{key}");
+        let string_literal_value = || {
+            match &value {
+                TokenTree::Literal(lit) => match litrs::Literal::from(lit) {
+                    litrs::Literal::String(str) => Some(str.value().to_owned()),
+                    _ => None,
+                },
+                _ => None,
+            }
+            .ok_or(CompilationSettingsError {
+                error: "expected string literal",
+                span: value.span(),
+            })
+        };
+        let is_duplicate = match key_text.as_str() {
+            "source" => {
+                self.source_span = Some(value.span());
+                self.source
+                    .replace(Source::Literal(string_literal_value()?))
+                    .is_some()
+            }
+            "file" => {
+                self.source_span = Some(value.span());
+                self.source
+                    .replace(Source::File(string_literal_value()?.into()))
+                    .is_some()
+            }
+            "stage" => todo!(),
+            "defines" => {
+                if !self.defines.is_empty() {
+                    true
+                } else {
+                    let TokenTree::Group(group) = value else {
+                        return Err(CompilationSettingsError {
+                            error: "expected group",
+                            span: key.span(),
+                        });
+                    };
+                    self.defines = parse_defines(&group)?;
+                    false
+                }
+            }
+            "language" => todo!(),
+            _ => {
+                return Err(CompilationSettingsError {
+                    error: "unrecognized key",
+                    span: key.span(),
+                });
+            }
+        };
+        if is_duplicate {
+            Err(CompilationSettingsError {
+                error: "duplicate key",
+                span: key.span(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+    fn make_whole(
+        self,
+        span: proc_macro::Span,
+    ) -> Result<CompilationSettings, CompilationSettingsError> {
+        Ok(CompilationSettings {
+            target_spirv_version: self
+                .target_spirv_version
+                .unwrap_or(shaderc::SpirvVersion::V1_0),
+            target_environment_version: self
+                .target_environment_version
+                .unwrap_or(shaderc::EnvVersion::Vulkan1_0),
+            stage: shaderc::ShaderKind::InferFromSource,
+            source: self.source.ok_or(CompilationSettingsError {
+                error: "missing shader source",
+                span,
+            })?,
+            source_span: self.source_span.unwrap(),
+            language: self.language.ok_or(CompilationSettingsError {
+                error: "missing source language",
+                span,
+            })?,
+            defines: self.defines,
+        })
+    }
+}
 struct CompilationSettings {
     target_spirv_version: shaderc::SpirvVersion,
     target_environment_version: shaderc::EnvVersion,
     stage: shaderc::ShaderKind,
     source: Source,
+    source_span: proc_macro::Span,
     language: shaderc::SourceLanguage,
-    defines: FxHashMap<String, String>,
+    defines: FxHashMap<String, Option<String>>,
+}
+struct CompilationSettingsError {
+    error: &'static str,
+    span: proc_macro::Span,
+}
+impl CompilationSettings {
+    fn from_tokens(
+        tokens: TokenStream,
+        lang: Option<shaderc::SourceLanguage>,
+    ) -> Result<Self, CompilationSettingsError> {
+        use proc_macro::TokenTree;
+        // Accept two syntaxes: if lang is Some, accept a string literal. Or,
+        // always accept a key-value set of args.
+        let mut tokens = tokens.into_iter().peekable();
+        // Attempt to parse the string literal form:
+        let root = tokens.peek().cloned().ok_or(CompilationSettingsError {
+            error: "provide a string literal of source code or a set of key-value pairs with compilation settings",
+            span: proc_macro::Span::call_site(),
+        })?;
+        if let TokenTree::Literal(lit) = &root {
+            let _ = tokens.next();
+            if let Some(tok) = tokens.next() {
+                return Err(CompilationSettingsError {
+                    error: "unexpected tokens",
+                    span: tok.span(),
+                });
+            }
+            let Some(lang) = lang else {
+                return Err(CompilationSettingsError {
+                    error: "language must be declared",
+                    span: lit.span(),
+                });
+            };
+
+            return match litrs::Literal::from(lit) {
+                litrs::Literal::String(str) => Ok(Self {
+                    language: lang,
+                    source: Source::Literal(str.value().to_owned()),
+                    source_span: lit.span(),
+                    stage: shaderc::ShaderKind::InferFromSource,
+                    defines: FxHashMap::default(),
+                    target_environment_version: shaderc::EnvVersion::Vulkan1_0,
+                    target_spirv_version: shaderc::SpirvVersion::V1_0,
+                }),
+                _ => Err(CompilationSettingsError {
+                    error: "expected a string literal",
+                    span: lit.span(),
+                }),
+            };
+        }
+        // Otherwise, attempt to read the key-value pairs.
+        let mut partial = PartialCompilationSettings {
+            language: lang,
+            ..Default::default()
+        };
+        loop {
+            // Read Key, colon, value tree, optional comma.
+            let Some(key) = tokens.next() else {
+                // No more pairs.
+                break;
+            };
+            let TokenTree::Ident(key) = key else {
+                return Err(CompilationSettingsError {
+                    error: "expected ident",
+                    span: key.span(),
+                });
+            };
+            if !tokens.next().is_some_and(|colon| is_punct(&colon, ':')) {
+                return Err(CompilationSettingsError {
+                    error: "expected trailing colon",
+                    span: key.span(),
+                });
+            }
+            let value = tokens.next().ok_or(CompilationSettingsError {
+                error: "expected value for key",
+                span: key.span(),
+            })?;
+            partial.key_value(key, value)?;
+
+            // Take comma, if any.
+            let Some(comma) = tokens.next() else {
+                break;
+            };
+            if !is_punct(&comma, ',') {
+                return Err(CompilationSettingsError {
+                    error: "expected comma",
+                    span: comma.span(),
+                });
+            }
+        }
+        partial.make_whole(proc_macro::Span::call_site())
+    }
 }
 
 trait UnwrapDisplay {
@@ -132,7 +570,7 @@ impl OperandExt for rspirv::dr::Operand {
         bits == 1
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum DepthMode {
     NotDepth = 0,
     Depth = 1,
@@ -194,8 +632,8 @@ impl ImageType {
             is_multisampled,
             sampling_mode,
             format,
-            // Access qualifier is for *kernel* modules, not shaders, so
-            // we dont care~
+            // Access qualifier is for *kernel* modules, not shaders, so we dont
+            // care~
             _access_qualifier @ ..,
         ] = operands
         else {
@@ -227,6 +665,7 @@ impl ImageType {
             },
             format: self.format,
             multisampled: self.is_multisampled,
+            depth: self.depth_mode,
         }
     }
 }
@@ -281,6 +720,7 @@ struct ImageRequirements {
     dim: ImageDimensionality,
     format: spirv::ImageFormat,
     multisampled: bool,
+    depth: DepthMode,
 }
 #[derive(Debug)]
 enum DescriptorBindingType {
@@ -363,8 +803,8 @@ impl Module {
                     let variable = self.variables.get(&variable_id).unwrap();
                     let pointer_ty = self.pointer_types.get(&variable.pointer_ty).unwrap();
                     // MAY Point to OpType[Resource] OR OpTypeStructure
-                    // decorated with BufferBlock OR an OpTypeArray thereof!
-                    // :O The array types give us the descriptor array count.
+                    // decorated with BufferBlock OR an OpTypeArray thereof! :O
+                    // The array types give us the descriptor array count.
                     let (pointee_id, array_count) = {
                         if let Some(array) = self.array_types.get(&pointer_ty.pointee_ty) {
                             let count = match self.constants.get(&array.count_id).unwrap() {
@@ -375,7 +815,8 @@ impl Module {
                             };
                             (array.base_ty, count)
                         } else {
-                            // Not an array, one less layer of indirection for us~.
+                            // Not an array, one less layer of indirection for
+                            // us~.
                             (pointer_ty.pointee_ty, 1)
                         }
                     };
@@ -584,7 +1025,8 @@ impl rspirv::binary::Consumer for Module {
                 let [_storage_class, _initializer @ ..] = inst.operands.as_slice() else {
                     panic!("bad parameters");
                 };
-                // _storage_classs is always equal to the pointer's storage class.
+                // _storage_classs is always equal to the pointer's storage
+                // class.
                 self.variables.insert(id, Variable { pointer_ty });
             }
             Op::Decorate => {
@@ -615,7 +1057,7 @@ impl rspirv::binary::Consumer for Module {
                     Dec::Block => {
                         decorations.is_uniform_buffer = true;
                     }
-                    _ => println!("ignoring decoration {decoration:?}"),
+                    _ => (), //println!("ignoring decoration {decoration:?}"),
                 };
             }
             // For tagging constants with a human-readable variable name, taken
@@ -749,25 +1191,11 @@ impl rspirv::binary::Consumer for Module {
         rspirv::binary::ParseAction::Continue
     }
 }
-fn input_string(input: TokenStream) -> String {
-    let mut iter = input.into_iter();
-    let string = iter.next().unwrap();
-    assert_eq!(iter.count(), 0);
-    let string = match string {
-        proc_macro::TokenTree::Literal(lit) => lit,
-        _ => panic!("expected a literal"),
-    };
-
-    let litrs::Literal::String(string) = litrs::Literal::from(string) else {
-        panic!("expected a string literal")
-    };
-    string.value().to_owned()
-}
 fn from_spirv(spirv: &[u32]) -> TokenStream {
     let mut module = Module::default();
     rspirv::binary::parse_words(spirv, &mut module).unwrap_display();
-    println!("{:#?}", module.get_descriptor_sets());
-    // Ensure we have at least one entry point, modules are invalid without one.
+    //println!("{:#?}", module.get_descriptor_sets()); Ensure we have at least
+    // one entry point, modules are invalid without one.
     assert!(!module.entry_points.is_empty());
     // Create a struct definition for all of the specialization constants.
     let (specialization_struct_def, specialization_struct_name) = if module
@@ -929,45 +1357,111 @@ fn from_spirv(spirv: &[u32]) -> TokenStream {
     }
     .into()
 }
-fn from_uncompiled(settings: CompilationSettings) -> TokenStream {
-    from_spirv(todo!())
+fn run_with_language(langauge: shaderc::SourceLanguage, stream: TokenStream) -> TokenStream {
+    let settings = CompilationSettings::from_tokens(stream, Some(langauge))
+        .unwrap_or_else(|err| proc_macro_error::abort!(err.span, err.error));
+    run_settings(settings)
 }
-/// Accepts a string literal as a filepath, expands to a static slice of the
-/// bytes of SPIR-V within the file.
-#[proc_macro]
-pub fn spirv(input: TokenStream) -> TokenStream {
-    let path = input_string(input);
-    let spirv = read_spirv_words(path);
-    from_spirv(&spirv)
-}
-/// Accepts a string literal containing GLSL source code, and expands to a
-/// static slice of the compiled SPIR-V. Use e.g. `#pragma shader_stage(vertex)`
-/// to specify the execution model.
-#[proc_macro]
-pub fn glsl(input: TokenStream) -> TokenStream {
-    let source = input_string(input);
+fn run_settings(settings: CompilationSettings) -> TokenStream {
+    let (source_text, source_file, add_line_number) = match settings.source {
+        Source::Literal(source) => (
+            source,
+            settings.source_span.file(),
+            settings.source_span.line() - 1,
+        ),
+        Source::File(path) => (
+            // FIXME: what should the root path of this relative path be,
+            // ideally?
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| proc_macro_error::abort_call_site!(err)),
+            path.to_string_lossy().into_owned(),
+            0,
+        ),
+    };
     let compiler = shaderc::Compiler::new().unwrap();
     let mut options = shaderc::CompileOptions::new().unwrap();
-    options.set_source_language(shaderc::SourceLanguage::GLSL);
+    options.set_source_language(settings.language);
     options.set_target_env(
         shaderc::TargetEnv::Vulkan,
-        shaderc::EnvVersion::Vulkan1_0 as _,
+        settings.target_environment_version as _,
     );
-    options.set_target_spirv(shaderc::SpirvVersion::V1_0);
+    options.set_target_spirv(settings.target_spirv_version);
+    for (key, value) in settings.defines {
+        options.add_macro_definition(&key, value.as_deref());
+    }
+    options.set_warnings_as_errors();
     let artifact = compiler
         .compile_into_spirv(
-            &source,
-            shaderc::ShaderKind::InferFromSource,
-            "<source>",
+            &source_text,
+            settings.stage,
+            &source_file,
             "main",
             Some(&options),
         )
-        .unwrap_display();
+        .unwrap_or_else(|err| {
+            proc_macro_error::abort!(
+                settings.source_span,
+                adjust_errors(&source_file, add_line_number, err)
+            )
+        });
     // ShaderC does not specify in what endian the bytes are returned.
     #[cfg(target_endian = "big")]
     unimplemented!("this is undocumented lol");
     let spirv = artifact.as_binary();
     from_spirv(spirv)
+}
+/// See [crate docs](crate) for usage.
+#[proc_macro_error::proc_macro_error]
+#[proc_macro]
+pub fn glsl(input: TokenStream) -> TokenStream {
+    run_with_language(shaderc::SourceLanguage::GLSL, input)
+}
+/// See [crate docs](crate) for usage.
+#[proc_macro_error::proc_macro_error]
+#[proc_macro]
+pub fn hlsl(input: TokenStream) -> TokenStream {
+    run_with_language(shaderc::SourceLanguage::HLSL, input)
+}
+
+/// Take a shaderc error, and adjust line/column numbers as necessary based on
+/// the span of the input text.
+fn adjust_errors(source_file: &str, add_lines: usize, error: shaderc::Error) -> String {
+    let compilation_error = match error {
+        shaderc::Error::CompilationError(_count, compilation_error) => compilation_error,
+        // dont adjust these types.
+        shaderc::Error::InitializationError(s)
+        | shaderc::Error::InternalError(s)
+        | shaderc::Error::InvalidAssembly(s)
+        | shaderc::Error::InvalidStage(s)
+        | shaderc::Error::NullResultObject(s)
+        | shaderc::Error::ParseError(s) => return s,
+    };
+    let mut output = String::new();
+
+    for line in compilation_error.lines() {
+        let try_parse = || -> Option<String> {
+            // Parse lines of the format "/file/name:5: error text: etc" where 5
+            // is the line number.
+            let (line_number, line) = line
+                .strip_prefix(source_file)?
+                .strip_prefix(':')?
+                .split_once(':')?;
+            let line_number = line_number.parse::<usize>().ok()? + add_lines;
+
+            Some(format!("{source_file}:{line_number}:{line}"))
+        };
+
+        if let Some(result) = try_parse() {
+            output += &result;
+        } else {
+            // Fallback to outputting the line as-is
+            output += line;
+        }
+        // GROG NOT CARE ABOUT PERFORMANCE HERE. THIS IS OFF-LINE CODE. it's out
+        // of character but it's fine. this is fine :,3
+        output += "\n";
+    }
+    output
 }
 
 /// Read a file as u32s, swapping endian if necessary based on the file magic.
@@ -996,70 +1490,3 @@ fn read_spirv_words(path: impl AsRef<std::path::Path>) -> Vec<u32> {
         _ => panic!("bad file magic"),
     }
 }
-
-/*
-fn main() -> () {
-    let path = std::env::args()
-        .nth(1)
-        .expect("usage: \"<spirv-path>\" OR \"<shader-path>\"");
-    let path = std::path::PathBuf::from(path);
-    let extension = path.extension().unwrap().to_str().unwrap();
-    let spirv = if extension == "spirv" {
-        read_spirv_words(&path)
-    } else {
-        let shader_kind = match extension {
-            "glsl" => shaderc::ShaderKind::InferFromSource,
-
-            "vert" => shaderc::ShaderKind::Vertex,
-            "frag" => shaderc::ShaderKind::Fragment,
-            "comp" => shaderc::ShaderKind::Compute,
-            _ => unimplemented!("unrecognized file extension"),
-        };
-        let source = std::fs::read_to_string(&path).unwrap();
-        let compiler = shaderc::Compiler::new().unwrap();
-        let mut options = shaderc::CompileOptions::new().unwrap();
-        options.set_source_language(shaderc::SourceLanguage::GLSL);
-        options.set_target_env(
-            shaderc::TargetEnv::Vulkan,
-            shaderc::EnvVersion::Vulkan1_0 as _,
-        );
-        options.set_target_spirv(shaderc::SpirvVersion::V1_0);
-        let artifact = compiler
-            .compile_into_spirv(
-                &source,
-                shader_kind,
-                path.file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .unwrap_or("<unknown>"),
-                "main",
-                Some(&options),
-            )
-            .unwrap();
-        // ShaderC does not specify in what endian the bytes are returned.
-        #[cfg(target_endian = "big")]
-        unimplemented!("this is undocumented lol");
-        artifact.as_binary().to_vec()
-    };
-    let mut module = Module::default();
-    // Reinterprets as bytes, so it has to be LE words regardless of platform
-    // endian.
-    #[cfg(target_endian = "big")]
-    unimplemented!("wants little endian, eegh");
-    rspirv::binary::parse_words(spirv, &mut module).unwrap();
-    for entry in &module.entry_points {
-        println!("Entry point {:?}: {:?}", entry.name, entry.model);
-    }
-    for (id, value) in module.spec_constants {
-        let name = module.names.get(&id);
-        if let Some(name) = name {
-            println!("specialization constant %{name} (%{id})");
-        } else {
-            println!("specialization constant %{id}");
-        }
-        println!(" - default value: {value:?}");
-        if let Some(location) = module.spec_ids.get(&id) {
-            println!(" - location: {location}");
-        }
-    }
-    todo!()
-}*/
