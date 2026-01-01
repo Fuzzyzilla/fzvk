@@ -2,11 +2,9 @@ const _: () = {
     fzvk_shader::glsl! {
         file: "fzvk/examples/shader.glsl",
         defines: {
-            "a": "b",
-            c: 12,
-            d: true,
-            ejagh: None,
-            "h",
+            should_be_defined,
+            should_be_true: true,
+            "should_be_five": 5,
         }
     }
 };

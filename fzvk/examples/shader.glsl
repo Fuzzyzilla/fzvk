@@ -1,6 +1,19 @@
 #version 460 core
 #pragma shader_stage(fragment)
 
+#ifdef should_be_undefined
+    #error should_be_undefined
+#endif
+#ifndef should_be_defined
+    #error should_be_defined
+#endif
+#if should_be_true != true
+    #error should_be_true
+#endif
+#if should_be_five != 5
+    #error should_be_five
+#endif
+
 layout(set = 0, binding = 0, r8ui) uniform restrict writeonly uimage2D someStorage[3];
 layout(set = 0, binding = 1) uniform sampler2DShadow wdwdw[3];
 // Ooopssie binding 1 is missing! (the spec allows this to be interpreted as

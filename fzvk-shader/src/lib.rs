@@ -35,8 +35,6 @@
 //!         "can_yippee": true,
 //!         // Define without value, equivalent to setting it to "".
 //!         defined,
-//!         // Undefine. Differs from "".
-//!         "nothing": None,
 //!     }
 //! }
 //! ```
@@ -192,13 +190,12 @@ fn parse_defines(
                 error: "expected value after delimeter",
                 span: delim.span(),
             })?;
-            let value: Option<String> = match &value {
+            let value: String = match &value {
                 TokenTree::Ident(ident) => {
                     let name = format!("{ident}");
                     match name.as_str() {
-                        "true" => Some("true".to_owned()),
-                        "false" => Some("false".to_owned()),
-                        "None" => None,
+                        "true" => "true".to_owned(),
+                        "false" => "false".to_owned(),
                         _ => {
                             return Err(CompilationSettingsError {
                                 error: "unexpected ident",
@@ -207,7 +204,7 @@ fn parse_defines(
                         }
                     }
                 }
-                TokenTree::Literal(lit) => Some(match litrs::Literal::from(lit) {
+                TokenTree::Literal(lit) => match litrs::Literal::from(lit) {
                     // FIXME: never called. `true` is an ident.
                     litrs::Literal::Bool(b) => b.as_str().to_owned(),
                     litrs::Literal::Float(_f) => unimplemented!(),
@@ -220,7 +217,7 @@ fn parse_defines(
                             span: lit.span(),
                         });
                     }
-                }),
+                },
                 tok => {
                     return Err(CompilationSettingsError {
                         error: "unexpected token",
@@ -228,7 +225,7 @@ fn parse_defines(
                     });
                 }
             };
-            if defines.insert(name_str, value).is_some() {
+            if defines.insert(name_str, Some(value)).is_some() {
                 return Err(CompilationSettingsError {
                     error: "duplicate define",
                     span: name.span(),
@@ -244,7 +241,7 @@ fn parse_defines(
                 });
             }
         } else if is_punct(&delim, ',') {
-            if defines.insert(name_str, Some(String::new())).is_some() {
+            if defines.insert(name_str, None).is_some() {
                 return Err(CompilationSettingsError {
                     error: "duplicate define",
                     span: name.span(),
@@ -1372,6 +1369,10 @@ fn run_settings(settings: CompilationSettings) -> TokenStream {
         Source::File(path) => (
             // FIXME: what should the root path of this relative path be,
             // ideally?
+
+            //FIXME: This makes our macro incredibly non-pure, a big nono. But
+            // there's no solution to this atm. See:
+            // https://github.com/rust-lang/rust/issues/99515
             std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| proc_macro_error::abort_call_site!(err)),
             path.to_string_lossy().into_owned(),
@@ -1428,15 +1429,11 @@ pub fn hlsl(input: TokenStream) -> TokenStream {
 fn adjust_errors(source_file: &str, add_lines: usize, error: shaderc::Error) -> String {
     let compilation_error = match error {
         shaderc::Error::CompilationError(_count, compilation_error) => compilation_error,
-        // dont adjust these types.
-        shaderc::Error::InitializationError(s)
-        | shaderc::Error::InternalError(s)
-        | shaderc::Error::InvalidAssembly(s)
-        | shaderc::Error::InvalidStage(s)
-        | shaderc::Error::NullResultObject(s)
-        | shaderc::Error::ParseError(s) => return s,
+        // Do not unwrap the internal string, as it is often empty.
+        x => return format!("{x}"),
     };
-    let mut output = String::new();
+
+    let mut output = String::with_capacity(compilation_error.len());
 
     for line in compilation_error.lines() {
         let try_parse = || -> Option<String> {
