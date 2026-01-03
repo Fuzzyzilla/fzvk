@@ -942,20 +942,24 @@ impl<'device> Device<'device> {
     }
     /// See [`Self::create_image_view_mutable_format`] to utilize
     /// `MUTABLE_FORMAT` image capabilities.
-    pub unsafe fn create_image_view_immutable_format<
+    pub unsafe fn create_image_view<
         Usage: ImageUsage,
-        Dim: Dimensionality,
+        ImageDim: Dimensionality,
+        ViewDim: CanView<ImageDim>,
         Format: format::Format,
         Samples: ImageSamples,
     >(
         &self,
-        image: &Image<Usage, Dim, Format, Samples>,
+        image: &Image<Usage, ImageDim, Format, Samples>,
+        // FIXME: Sux.
+        dim: ViewDim,
         component_mapping: ComponentMapping,
-        subresource_range: (),
-    ) -> Result<ImageView<Usage, Dim, Format, Samples>, AllocationError> {
+        subresource_range: ImageDim::SubresourceRange,
+    ) -> Result<ImageView<Usage, ViewDim, Format, Samples>, AllocationError> {
         // Safety - Image and view statically forced to have same format.
-        self.create_image_view_mutable_format::<Usage, Dim, Format, Format, Samples>(
+        self.create_image_view_mutable_format::<Usage, ImageDim, ViewDim, Format, Format, Samples>(
             image,
+            dim,
             component_mapping,
             subresource_range,
         )
@@ -963,33 +967,32 @@ impl<'device> Device<'device> {
     /// Safety - If the `ImageFormat` and `ViewFormat` differ, the image must
     /// have been created with the `MUTABLE_FORMAT` flag.
     ///
-    /// See [`Self::create_image_view_immutable_format`] for a safer constrained
-    /// version.
+    /// See [`Self::create_image_view`] for a safer constrained version.
     pub unsafe fn create_image_view_mutable_format<
         Usage: ImageUsage,
-        Dim: Dimensionality,
+        ImageDim: Dimensionality,
+        ViewDim: CanView<ImageDim>,
         ImageFormat: format::Format,
         ViewFormat: format::CompatibleWith<ImageFormat>,
         Samples: ImageSamples,
     >(
         &self,
-        image: &Image<Usage, Dim, ImageFormat, Samples>,
+        image: &Image<Usage, ImageDim, ImageFormat, Samples>,
+        // FIXME: Sux.
+        _dim: ViewDim,
         component_mapping: ComponentMapping,
-        subresource_range: (),
-    ) -> Result<ImageView<Usage, Dim, ViewFormat, Samples>, AllocationError> {
+        subresource_range: ImageDim::SubresourceRange,
+    ) -> Result<ImageView<Usage, ViewDim, ViewFormat, Samples>, AllocationError> {
         self.0
             .create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image.handle())
                     .format(ViewFormat::FORMAT)
-                    .view_type(Dim::VIEW_TYPE)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: <ImageFormat::Aspect as format::Aspect>::ASPECT,
-                        base_mip_level: 0,
-                        level_count: vk::REMAINING_MIP_LEVELS,
-                        base_array_layer: 0,
-                        layer_count: vk::REMAINING_ARRAY_LAYERS,
-                    })
+                    .view_type(ViewDim::VIEW_TYPE)
+                    .subresource_range(
+                        subresource_range
+                            .subresource_range(<ImageFormat::Aspect as format::Aspect>::ASPECT),
+                    )
                     .components(component_mapping.into()),
                 None,
             )
@@ -1347,18 +1350,6 @@ impl<'device> Device<'device> {
             image_transitions
                 .as_barriers(src_access, dst_access)
                 .as_ref(),
-            /*image_transitions.map(|transition| {
-                    vk::ImageMemoryBarrier::default()
-                        .image(transition.image)
-                        .old_layout(transition.from)
-                        .new_layout(transition.to)
-                        .subresource_range(transition.subresource_range)
-                        .src_access_mask(src_access)
-                        .dst_access_mask(dst_access)
-                        // Defines a "none" ownership transfer.
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            }),*/
         );
         image_transitions.into_after_transition()
     }
@@ -1379,21 +1370,21 @@ impl<'device> Device<'device> {
         SuperUsage: ImageSuperset<TransferDst>,
         Dim: Dimensionality,
         Format: format::HasAspect<format::Color>,
+        Layout: layout::UsableAs<layout::TransferDst>,
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         buffer: impl AsRef<Buffer<TransferSrc>>,
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
-        image: &'_ Image<SuperUsage, Dim, Format, SingleSampled>,
-        image_layout: vk::ImageLayout,
+        image: &'_ ImageReference<'_, SuperUsage, Dim, Format, SingleSampled, Layout>,
         regions: [BufferImageCopy<Dim>; N],
     ) -> &'a Self {
         self.0.cmd_copy_buffer_to_image(
             command_buffer.handle(),
             buffer.as_ref().handle(),
             image.handle(),
-            image_layout,
+            Layout::LAYOUT,
             &regions.map(|region| vk::BufferImageCopy {
                 image_offset: region.image_offset.offset(),
                 image_extent: region.image_extent.extent(),
@@ -1408,7 +1399,6 @@ impl<'device> Device<'device> {
                     .subresource_layers(vk::ImageAspectFlags::COLOR),
             }),
         );
-        //todo!();
         self
     }
     pub unsafe fn copy_image_to_buffer<
@@ -1419,20 +1409,20 @@ impl<'device> Device<'device> {
         SuperUsage: ImageSuperset<TransferSrc>,
         Dim: Dimensionality,
         Format: format::HasAspect<format::Color>,
+        Layout: layout::UsableAs<layout::TransferSrc>,
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
-        image: &Image<SuperUsage, Dim, Format, SingleSampled>,
-        image_layout: vk::ImageLayout,
+        image: &'_ ImageReference<'_, SuperUsage, Dim, Format, SingleSampled, Layout>,
         buffer: impl AsRef<Buffer<TransferDst>>,
         regions: [BufferImageCopy<Dim>; N],
     ) -> &'a Self {
         self.0.cmd_copy_image_to_buffer(
             command_buffer.handle(),
             image.handle(),
-            image_layout,
+            Layout::LAYOUT,
             buffer.as_ref().handle(),
             &regions.map(|region| vk::BufferImageCopy {
                 image_offset: region.image_offset.offset(),
@@ -1448,7 +1438,7 @@ impl<'device> Device<'device> {
                     .subresource_layers(vk::ImageAspectFlags::COLOR),
             }),
         );
-        todo!()
+        self
     }
     pub unsafe fn dispatch_base<
         'a,
@@ -1556,87 +1546,4 @@ impl<'device> Device<'device> {
         self.0.cmd_end_render_pass(buffer.handle());
         unsafe { buffer.with_state() }
     }
-}
-unsafe fn waawa() {
-    fn todo<T>() -> T {
-        todo!();
-    }
-
-    let device: Device = todo();
-    let mut queue: Queue = todo();
-
-    let image_extent = Extent2D {
-        width: NonZero::new(128).unwrap(),
-        height: NonZero::new(128).unwrap(),
-    };
-
-    let mut pool = device
-        .create_command_pool(&vk::CommandPoolCreateInfo::default())
-        .unwrap();
-    let buffer = device
-        .create_buffer(
-            (Vertex, Index, TransferSrc),
-            NonZero::new(
-                u64::from(image_extent.width.get()) * u64::from(image_extent.height.get()) * 4,
-            )
-            .unwrap(),
-            SharingMode::Exclusive,
-        )
-        .unwrap()
-        // Todo:
-        .assume_backed();
-    let image = device
-        .create_image(
-            (TransferDst, TransferSrc),
-            image_extent,
-            MipCount::ONE,
-            format::R8G8B8A8_SRGB,
-            SingleSampled,
-            vk::ImageTiling::OPTIMAL,
-            SharingMode::Exclusive,
-        )
-        .unwrap()
-        // Todo:
-        .assume_backed();
-    let renderpass = device.create_render_pass(&[todo(), todo()]).unwrap();
-    let [mut cb1, cb2] = device.allocate_command_buffers(&mut pool, Primary).unwrap();
-
-    let mut recording = device.begin_command_buffer(&mut pool, &mut cb1).unwrap();
-
-    device.copy_buffer_to_image(
-        &mut recording,
-        &buffer,
-        &image,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        [BufferImageCopy {
-            buffer_offset: 0,
-            image_offset: Offset::ORIGIN,
-            image_extent,
-            layers: SubresourceMip::ZERO,
-            pitch: BufferPitch::PACKED,
-        }],
-    );
-    let mut render_pass = device.begin_render_pass(recording, &renderpass);
-    device
-        .bind_vertex_buffers(&mut render_pass, 0, &[buffer.reference()], &[0])
-        .bind_index_buffer(&mut render_pass, &buffer, 512, vk::IndexType::UINT16)
-        .draw_indexed(&mut render_pass, 0, 0..10, 0..1);
-    let render_pass = device.next_subpass(render_pass);
-    let recording = device.end_render_pass(render_pass);
-    device.end_command_buffer(recording).unwrap();
-
-    let fence = device.create_fence::<Unsignaled>().unwrap().into_inner();
-    let SubmitWithFence {
-        pending_fence: fence,
-        ..
-    } = device
-        .submit_with_fence(&mut queue, [], &[cb1.reference()], [], fence)
-        .unwrap();
-    let fence = device.wait_fence(fence).unwrap();
-    device
-        .destroy_fence(fence)
-        .free_command_buffers(&mut pool, [cb1, cb2])
-        .destroy_command_pool(pool)
-        .destroy_buffer(buffer)
-        .destroy_image(image);
 }

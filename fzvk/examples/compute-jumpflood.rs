@@ -292,9 +292,12 @@ pub fn main() -> Result<()> {
         width: image.width().try_into()?,
         height: image.height().try_into()?,
     };
-    // Number of bytes for the final image, RGU16 is 4 bytes per texel.
-    let output_size_bytes =
-        NonZero::new(u64::from(extent.width.get()) * u64::from(extent.height.get()) * 4).unwrap();
+    let output_size_bytes = NonZero::new(
+        u64::from(extent.width.get())
+            * u64::from(extent.height.get())
+            * u64::from(format::R16G16_UINT::TEXEL_SIZE),
+    )
+    .unwrap();
 
     unsafe {
         // =========================================================================================
@@ -332,7 +335,7 @@ pub fn main() -> Result<()> {
             (TransferSrc, Storage),
             // Two layers to "pingpong" between. For each of the iterations, we
             // will swap each between source and destination.
-            extent.with_layers(ArrayCount::TWO),
+            extent.with_layers(CreateArrayCount::TWO),
             MipCount::ONE,
             // Enough space to store a non-normalized UV coordinate.
             format::R16G16_UINT,
@@ -389,41 +392,25 @@ pub fn main() -> Result<()> {
         // Make the written values visible to the device.
         ash_device.flush_mapped_memory_ranges(&[buffer_map_range])?;
 
-        let reference_image_view = device.create_image_view_immutable_format(
+        let reference_image_view = device.create_image_view(
             &reference_image,
+            // FIXME: Sux
+            D2,
             ComponentMapping::IDENTITY,
-            (),
+            SubresourceMips::ALL,
         )?;
         let pingpong_views = [
-            ash_device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .components(vk::ComponentMapping::default())
-                    .format(vk::Format::R16G16_UINT)
-                    .image(pingpong_array.handle())
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    }),
-                None,
+            device.create_image_view(
+                &pingpong_array,
+                D2,
+                ComponentMapping::IDENTITY,
+                SubresourceRange::range(.., 0..1),
             )?,
-            ash_device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .components(vk::ComponentMapping::default())
-                    .format(vk::Format::R16G16_UINT)
-                    .image(pingpong_array.handle())
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 1,
-                        layer_count: 1,
-                    }),
-                None,
+            device.create_image_view(
+                &pingpong_array,
+                D2,
+                ComponentMapping::IDENTITY,
+                SubresourceRange::range(.., 1..2),
             )?,
         ];
 
@@ -497,14 +484,14 @@ pub fn main() -> Result<()> {
                     .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                     .image_info(&[vk::DescriptorImageInfo::default()
                         .image_layout(vk::ImageLayout::GENERAL)
-                        .image_view(pingpong_views[0])]),
+                        .image_view(pingpong_views[0].handle())]),
                 vk::WriteDescriptorSet::default()
                     .dst_set(ash_pingpong_descriptor_sets[1])
                     .dst_binding(0)
                     .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                     .image_info(&[vk::DescriptorImageInfo::default()
                         .image_layout(vk::ImageLayout::GENERAL)
-                        .image_view(pingpong_views[1])]),
+                        .image_view(pingpong_views[1].handle())]),
             ],
             &[],
         );
@@ -588,15 +575,14 @@ pub fn main() -> Result<()> {
         device.copy_buffer_to_image(
             &mut recording,
             &buffer,
-            &reference_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &reference_image_ref,
             // Whole image
             [BufferImageCopy {
                 buffer_offset: 0,
                 image_offset: Offset::ORIGIN,
                 image_extent: extent,
                 pitch: BufferPitch::PACKED,
-                layers: SubresourceMip::ZERO,
+                layers: SubresourceMip::BASE_LEVEL,
             }],
         );
         let _reference_image_ref = device
@@ -697,7 +683,7 @@ pub fn main() -> Result<()> {
             readbuf = if readbuf == 0 { 1 } else { 0 };
         }
         // Export the final image back to the host buffer
-        let _pingpong_image_ref = device.barrier(
+        let pingpong_image_ref = device.barrier(
             &mut recording,
             barrier::ComputeShader::WRITE,
             barrier::Transfer::READ,
@@ -708,39 +694,16 @@ pub fn main() -> Result<()> {
         );
         // It's safe to write to the buffer after the read at the start, due to
         // the transfer -> compute shader -> transfer dependency chain.
-        /*.copy_image_to_buffer(
+        device.copy_image_to_buffer(
             &mut recording,
-            &pingpong_array,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            &pingpong_image_ref,
             &buffer,
             [BufferImageCopy {
                 buffer_offset: 0,
                 image_offset: Offset::ORIGIN,
-                image_extent: todo(), // wrongly expects a Layers >= 2 .
+                image_extent: extent,
                 pitch: BufferPitch::PACKED,
-                layers: SubresourceMipArray::new(0, 0..1),
-            }],
-        );*/
-        ash_device.cmd_copy_image_to_buffer(
-            recording.handle(),
-            pingpong_array.handle(),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            buffer.handle(),
-            &[vk::BufferImageCopy {
-                buffer_offset: 0,
-                image_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_array_layer: readbuf as u32,
-                    layer_count: 1,
-                    mip_level: 0,
-                },
-                image_extent: vk::Extent3D {
-                    width: extent.width.get(),
-                    height: extent.height.get(),
-                    depth: 1,
-                },
-                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-                ..Default::default()
+                layers: SubresourceLayers::new(0, readbuf as u32, NonZero::<u32>::MIN),
             }],
         );
 
@@ -792,9 +755,9 @@ pub fn main() -> Result<()> {
         ash_device.free_memory(ash_pingpong_memory, None);
 
         let [pingpong_view_0, pingpong_view_1] = pingpong_views;
-        ash_device.destroy_image_view(pingpong_view_0, None);
-        ash_device.destroy_image_view(pingpong_view_1, None);
         device
+            .destroy_image_view(pingpong_view_0)
+            .destroy_image_view(pingpong_view_1)
             .destroy_fence(fence)
             .destroy_command_pool(command_pool)
             .destroy_pipeline(pingpong_pipe)

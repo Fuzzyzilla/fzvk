@@ -100,7 +100,7 @@ unsafe impl Extent for Extent1D {
 /// The width and layers of a 1-dimensional array image.
 pub struct Extent1DArray {
     pub width: NonZero<u32>,
-    pub layers: ArrayCount,
+    pub layers: CreateArrayCount,
 }
 unsafe impl Extent for Extent1DArray {
     type Dim = D1Array;
@@ -119,10 +119,10 @@ unsafe impl Extent for Extent1DArray {
 pub struct Extent2DArray {
     pub width: NonZero<u32>,
     pub height: NonZero<u32>,
-    pub layers: ArrayCount,
+    pub layers: CreateArrayCount,
 }
 impl Extent2D {
-    pub fn with_layers(self, layers: ArrayCount) -> Extent2DArray {
+    pub fn with_layers(self, layers: CreateArrayCount) -> Extent2DArray {
         Extent2DArray {
             width: self.width,
             height: self.height,
@@ -222,8 +222,8 @@ impl Offset for Offset3D {
 /// whether it is created with an array count > 1. Note that this differs for
 /// views, where an array view with 1 layer and a regular view are distict
 /// concepts.
-pub struct ArrayCount(NonZero<u32>);
-impl ArrayCount {
+pub struct CreateArrayCount(NonZero<u32>);
+impl CreateArrayCount {
     /// The minimum array count.
     pub const TWO: Self = Self::new(2).unwrap();
     /// Create an array count, >= 2 None if an invalid count.
@@ -259,9 +259,19 @@ impl MipCount {
 
 /// The number of dimensions in an image, including whether it's an array.
 pub trait Dimensionality: 'static {
-    /// The size in each dimension, plus an array layer count if applicable.
+    /// The size in each dimension, plus an array layer count if applicable,
+    /// used when creating the image.
+    type CreateExtent: Extent;
+    /// The size in each dimension, used when referring to a subregion of the
+    /// image. Equivalent to the [`Dimensionality::CreateExtent`] of the
+    /// equivalent non-arrayed [`Dimensionality`].
     type Extent: Extent;
-    type SubresourceLayers: SubresourceLayers;
+    /// Indexes a single mipmap level, possibly across a range of layers if
+    /// applicable.
+    type SubresourceLayers: HasSubresourceLayers;
+    /// Indexes a range of mipmap levels and possibly a range of layers if
+    /// applicable.
+    type SubresourceRange: HasSubresourceRange;
     /// An offset into an image of this dimensionality.
     type Offset: Offset;
     /// How an N-dimensional image's addresses should be translated into
@@ -271,7 +281,6 @@ pub trait Dimensionality: 'static {
     const IMAGE_TYPE: vk::ImageType;
     const VIEW_TYPE: vk::ImageViewType;
 }
-pub struct BufferPitchD3;
 /// Typestate for a 1-dimensional image.
 pub struct D1;
 /// Typestate for a 1-dimensional array image.
@@ -283,54 +292,104 @@ pub struct D2Array;
 /// Typestate for a 3-dimensional image.
 pub struct D3;
 impl Dimensionality for D1 {
+    type CreateExtent = Extent1D;
     type Extent = Extent1D;
     type Offset = Offset1D;
     type Pitch = ();
     type SubresourceLayers = SubresourceMip;
+    type SubresourceRange = SubresourceMips;
     const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
     const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_1D;
 }
 impl Dimensionality for D1Array {
-    type Extent = Extent1DArray;
+    type CreateExtent = Extent1DArray;
+    type Extent = Extent1D;
     type Offset = Offset1D;
     type Pitch = RowPitch;
-    type SubresourceLayers = SubresourceMipArray;
+    type SubresourceLayers = SubresourceLayers;
+    type SubresourceRange = SubresourceRange;
     const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_1D;
     const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_1D_ARRAY;
 }
 impl Dimensionality for D2 {
+    type CreateExtent = Extent2D;
     type Extent = Extent2D;
     type Offset = Offset2D;
     type Pitch = RowPitch;
     type SubresourceLayers = SubresourceMip;
+    type SubresourceRange = SubresourceMips;
     const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
     const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_2D;
 }
 impl Dimensionality for D2Array {
-    type Extent = Extent2DArray;
+    type CreateExtent = Extent2DArray;
+    type Extent = Extent2D;
     type Offset = Offset2D;
     type Pitch = RowSlicePitch;
-    type SubresourceLayers = SubresourceMipArray;
+    type SubresourceLayers = SubresourceLayers;
+    type SubresourceRange = SubresourceRange;
     const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_2D;
     const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_2D_ARRAY;
 }
 impl Dimensionality for D3 {
+    type CreateExtent = Extent3D;
     type Extent = Extent3D;
     type Offset = Offset3D;
     type Pitch = RowSlicePitch;
     type SubresourceLayers = SubresourceMip;
+    type SubresourceRange = SubresourceMips;
     const IMAGE_TYPE: vk::ImageType = vk::ImageType::TYPE_3D;
     const VIEW_TYPE: vk::ImageViewType = vk::ImageViewType::TYPE_3D;
 }
-pub trait SubresourceLayers {
+
+/// Implemented for dimensionalities which can be constructed from views of
+/// `Other` dimensionality.
+pub trait CanView<Other: Dimensionality>: Dimensionality {}
+// Can, of course, view every dimensionality as itself.
+impl<Dim: Dimensionality> CanView<Dim> for Dim {}
+
+// Can view a single element of an array as a non-array.
+impl CanView<D1Array> for D1 {}
+impl CanView<D2Array> for D2 {}
+
+// Can view non-array as an array of 1 layer.
+impl CanView<D1> for D1Array {}
+impl CanView<D2> for D2Array {}
+
+pub unsafe trait HasSubresourceRange {
+    /// The entire image, all mip levels and all array layers.
+    const ALL: Self;
+    /// Get the vulkan subresource range structure associated with this value.
+    ///
+    /// Neither [`vk::ImageSubresourceRange::layer_count`] nor
+    /// [`vk::ImageSubresourceRange::level_count`] can be zero.
+    fn subresource_range(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange;
+}
+pub unsafe trait HasSubresourceLayers {
+    /// Get the vulkan subresource layers structure associated with this value.
+    ///
+    /// The [`vk::ImageSubresourceLayers::layer_count`] must not be 0 or
+    /// `VK_REMAINING_LAYERS`.
     fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers;
 }
+/// Implemented for ranges that are closed on the right: `a..b`, `a..=b`, `..b`,
+/// and `..=b` (but not, for example, `a..`)
+///
+/// # Safety
+/// Types implementing this trait *must not* return
+/// [`core::ops::Bound::Unbounded`] for [`core::ops::RangeBounds::end_bound`]
+pub unsafe trait RangeClosedRight<T>: core::ops::RangeBounds<T> {}
+unsafe impl<T> RangeClosedRight<T> for core::ops::Range<T> {}
+unsafe impl<T> RangeClosedRight<T> for core::ops::RangeInclusive<T> {}
+unsafe impl<T> RangeClosedRight<T> for core::ops::RangeTo<T> {}
+unsafe impl<T> RangeClosedRight<T> for core::ops::RangeToInclusive<T> {}
+
 /// A single mip level of a non-array image.
 pub struct SubresourceMip(pub u32);
 impl SubresourceMip {
-    pub const ZERO: Self = Self(0);
+    pub const BASE_LEVEL: Self = Self(0);
 }
-impl SubresourceLayers for SubresourceMip {
+unsafe impl HasSubresourceLayers for SubresourceMip {
     fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
         vk::ImageSubresourceLayers {
             aspect_mask: aspect,
@@ -340,55 +399,180 @@ impl SubresourceLayers for SubresourceMip {
         }
     }
 }
+pub struct SubresourceMips {
+    start: u32,
+    count: NonZero<u32>,
+}
+unsafe impl HasSubresourceRange for SubresourceMips {
+    const ALL: Self = Self {
+        start: 0,
+        count: NonZero::new(vk::REMAINING_MIP_LEVELS).unwrap(),
+    };
+    fn subresource_range(&self, aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange {
+            aspect_mask,
+            base_mip_level: self.start,
+            level_count: self.count.get(),
+            base_array_layer: 0,
+            layer_count: vk::REMAINING_ARRAY_LAYERS,
+        }
+    }
+}
 /// A single mip level of a range of image layers.
-pub struct SubresourceMipArray {
+pub struct SubresourceLayers {
     mip: u32,
-    start_layer: u32,
+    base_array_layer: u32,
+    /// Must not be VK_REMAINING_LAYERS.
     layer_count: NonZero<u32>,
 }
-impl SubresourceMipArray {
-    /// Reference a span of layers at a given mip level.
+impl SubresourceLayers {
+    /// Reference a range of layers at a given mip level.
     ///
-    /// If a range is specified without an end, e.g. `0..`,
-    /// `VK_REMAINING_LAYERS` is specified. # Panics If layers is an inverted or
-    /// empty range.
-    pub fn new(mip: u32, layers: impl core::ops::RangeBounds<u32>) -> Self {
-        let start_layer = match layers.start_bound() {
-            core::ops::Bound::Excluded(&a) => a.checked_add(1).unwrap(),
+    /// Due to [a
+    /// mistake](https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_maintenance5.html#_vk_remaining_array_layers_for_vkimagesubresourcelayers_layercount)
+    /// in the vulkan specification, the `layers` parameter does not accept
+    /// right-unbounded ranges, and the `VK_REMAINING_LAYERS` special constant
+    /// is not usable.
+    /// # Panics
+    /// If `layers` refers to an empty or inverted range.
+    pub fn range(mip: u32, layers: impl RangeClosedRight<u32>) -> Self {
+        let base_array_layer = match layers.start_bound() {
+            core::ops::Bound::Excluded(&a) => a.strict_add(1),
             core::ops::Bound::Included(&a) => a,
             core::ops::Bound::Unbounded => 0,
         };
         let layer_count = match layers.end_bound() {
             core::ops::Bound::Excluded(&end) => {
-                assert!(start_layer < end);
+                assert!(base_array_layer < end);
                 // Safety - just checked that end is strictly larger, therefore
                 // a difference >= 1.
-                unsafe { NonZero::new_unchecked(end - start_layer) }
+                unsafe { NonZero::new_unchecked(end - base_array_layer) }
             }
             core::ops::Bound::Included(&end) => {
-                assert!(start_layer <= end);
-                let count = (end - start_layer)
-                    .checked_add(1)
-                    .expect("overflow in SubresourceMipArray::new");
+                assert!(base_array_layer <= end);
+                let count = (end - base_array_layer).strict_add(1);
                 // Unconditional +1, always nonzero.
                 unsafe { NonZero::new_unchecked(count) }
             }
-            core::ops::Bound::Unbounded => NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap(),
+            // Guarded by unsafe contract of `ClosedRight` trait.
+            core::ops::Bound::Unbounded => unsafe { core::hint::unreachable_unchecked() },
         };
+        // This constant is not allowed in this API.
+        assert_ne!(layer_count.get(), vk::REMAINING_ARRAY_LAYERS);
         Self {
             mip,
-            start_layer,
+            base_array_layer,
+            layer_count,
+        }
+    }
+    pub fn new(mip: u32, base_array_layer: u32, layer_count: NonZero<u32>) -> Self {
+        Self {
+            mip,
+            base_array_layer,
             layer_count,
         }
     }
 }
-impl SubresourceLayers for SubresourceMipArray {
+unsafe impl HasSubresourceLayers for SubresourceLayers {
     fn subresource_layers(&self, aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
         vk::ImageSubresourceLayers {
             aspect_mask: aspect,
             mip_level: self.mip,
-            base_array_layer: self.start_layer,
+            base_array_layer: self.base_array_layer,
             layer_count: self.layer_count.get(),
+        }
+    }
+}
+pub struct SubresourceRange {
+    base_mip_level: u32,
+    /// May be `VK_REMAINING_LEVELS`
+    level_count: NonZero<u32>,
+    base_array_layer: u32,
+    /// May be `VK_REMAINING_LAYERS`
+    layer_count: NonZero<u32>,
+}
+unsafe impl HasSubresourceRange for SubresourceRange {
+    const ALL: Self = Self {
+        base_mip_level: 0,
+        level_count: NonZero::new(vk::REMAINING_MIP_LEVELS).unwrap(),
+        base_array_layer: 0,
+        layer_count: NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap(),
+    };
+    fn subresource_range(&self, aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange {
+            aspect_mask,
+            base_mip_level: self.base_mip_level,
+            level_count: self.level_count.get(),
+            base_array_layer: self.base_array_layer,
+            layer_count: self.layer_count.get(),
+        }
+    }
+}
+impl SubresourceRange {
+    const REMAINING_MIP_LEVELS: NonZero<u32> = NonZero::new(vk::REMAINING_MIP_LEVELS).unwrap();
+    const REMAINING_ARRAY_LAYERS: NonZero<u32> = NonZero::new(vk::REMAINING_ARRAY_LAYERS).unwrap();
+    /// Construct a range referring to several mip levels across several layers
+    /// of an image.
+    ///
+    /// `VK_REMAINING_*` constants should *not* be used in the ranges. Instead,
+    /// leave the right side of the range unbounded.
+    /// # Panics
+    /// If either range refers to an empty or inverted range.
+    pub fn range(
+        mip_levels: impl core::ops::RangeBounds<u32>,
+        array_layers: impl core::ops::RangeBounds<u32>,
+    ) -> Self {
+        use core::ops::Bound;
+        let (base_mip_level, level_count) = {
+            let start_inclusive = match mip_levels.start_bound().cloned() {
+                Bound::Unbounded => 0,
+                Bound::Included(x) => x,
+                Bound::Excluded(x) => x.strict_add(1),
+            };
+            let count = match mip_levels.end_bound().cloned() {
+                Bound::Unbounded => Self::REMAINING_MIP_LEVELS,
+                // Safety: +1 means never zero.
+                Bound::Included(x) => unsafe {
+                    NonZero::new_unchecked(x.strict_sub(start_inclusive).strict_add(1))
+                },
+                Bound::Excluded(x) => NonZero::new(x.strict_sub(start_inclusive)).unwrap(),
+            };
+            (start_inclusive, count)
+        };
+        let (base_array_layer, layer_count) = {
+            let start_inclusive = match array_layers.start_bound().cloned() {
+                Bound::Unbounded => 0,
+                Bound::Included(x) => x,
+                Bound::Excluded(x) => x.strict_add(1),
+            };
+            let count = match array_layers.end_bound().cloned() {
+                Bound::Unbounded => Self::REMAINING_ARRAY_LAYERS,
+                // Safety: +1 means never zero.
+                Bound::Included(x) => unsafe {
+                    NonZero::new_unchecked(x.strict_sub(start_inclusive).strict_add(1))
+                },
+                Bound::Excluded(x) => NonZero::new(x.strict_sub(start_inclusive)).unwrap(),
+            };
+            (start_inclusive, count)
+        };
+        SubresourceRange {
+            base_mip_level,
+            level_count,
+            base_array_layer,
+            layer_count,
+        }
+    }
+    pub fn new(
+        base_mip_level: u32,
+        level_count: NonZero<u32>,
+        base_array_layer: u32,
+        layer_count: NonZero<u32>,
+    ) -> Self {
+        Self {
+            base_mip_level,
+            level_count,
+            base_array_layer,
+            layer_count,
         }
     }
 }
@@ -487,6 +671,17 @@ pub struct ImageReference<
     crate::handle::NonNull<vk::Image>,
     core::marker::PhantomData<(&'a Image<Usage, Dim, Format, Samples>, Layout)>,
 );
+unsafe impl<
+    'a,
+    Usage: ImageUsage,
+    Dim: Dimensionality,
+    Format: format::Format,
+    Samples: ImageSamples,
+    Layout: layout::Layout,
+> ThinHandle for ImageReference<'a, Usage, Dim, Format, Samples, Layout>
+{
+    type Handle = vk::Image;
+}
 
 impl<
     'a,
@@ -708,7 +903,8 @@ pub mod layout {
     pub trait UsableAs<Which: Layout>: Layout {}
     /// General layout can be used for any layout's task.
     impl<Other: Layout> UsableAs<Other> for General {}
-    // Cannot `impl<T> UsableAs<T> for T` because that interferes with the above.
+    // Cannot `impl<T> UsableAs<T> for T` because that interferes with the
+    // above.
 
     /// This layout cannot be transitioned into. Transitions *from* this layout
     /// mean "discard contents", which may yield better performance if the
