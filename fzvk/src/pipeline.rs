@@ -439,3 +439,28 @@ impl PushValue {
         unsafe { core::slice::from_raw_parts(array.as_ptr().cast(), len_bytes) }
     }
 }
+impl From<u32> for PushValue {
+    fn from(value: u32) -> Self {
+        Self { u32: value }
+    }
+}
+impl From<i32> for PushValue {
+    fn from(value: i32) -> Self {
+        Self { i32: value }
+    }
+}
+impl From<f32> for PushValue {
+    fn from(value: f32) -> Self {
+        Self { f32: value }
+    }
+}
+impl From<Bool32> for PushValue {
+    fn from(value: Bool32) -> Self {
+        Self { bool: value }
+    }
+}
+impl From<bool> for PushValue {
+    fn from(value: bool) -> Self {
+        Self { bool: value.into() }
+    }
+}

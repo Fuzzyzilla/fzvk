@@ -8,8 +8,8 @@ use super::{Device, ThinHandle, buffer, format, image, usage, vk};
 /// represented as an external wrapper instead of an internal typestate on the
 /// underlying handle.
 #[repr(transparent)]
-pub struct Virtual<V: NeedsMemory>(V);
-impl<V: NeedsMemory> Virtual<V> {
+pub struct Virtual<V: HasMemoryRequirements>(V);
+impl<V: HasMemoryRequirements> Virtual<V> {
     /// Assume the virtual resource has had a complete, contiguous, and
     /// satisfactory range of memory bound to it through external APIs.
     pub unsafe fn assume_backed(self) -> V {
@@ -20,13 +20,12 @@ impl<V: NeedsMemory> Virtual<V> {
 //pub struct BindInfo<T: ThinHandle> {}
 
 // Safety: repr(transparent) over repr(transparent) over Handle. X3
-unsafe impl<V: NeedsMemory> ThinHandle for Virtual<V> {
+unsafe impl<V: HasMemoryRequirements> ThinHandle for Virtual<V> {
     type Handle = V::Handle;
 }
 // Yes this technically allows for `Virtual<Virtual<Virtual<....>>>` but it
 // works as intended so w/e. You can't construct that anyways.
-impl<V: NeedsMemory> NeedsMemory for Virtual<V> {
-    type BindInfo<'a> = V::BindInfo<'a>;
+impl<V: HasMemoryRequirements> HasMemoryRequirements for Virtual<V> {
     type Bound = V::Bound;
     unsafe fn memory_requirements(&self, device: &Device) -> vk::MemoryRequirements {
         self.0.memory_requirements(device)
@@ -34,24 +33,22 @@ impl<V: NeedsMemory> NeedsMemory for Virtual<V> {
 }
 /// Trait for handles that require vulkan memory to be bound to them, `Images`
 /// and `Buffers`.
-pub trait NeedsMemory: ThinHandle {
-    /// The information needed to bind memory to `self`.
-    type BindInfo<'a>;
+pub trait HasMemoryRequirements: ThinHandle {
     /// The type that results from successfully binding memory to `self`.
     type Bound;
     unsafe fn memory_requirements(&self, device: &Device) -> vk::MemoryRequirements;
 }
 /// Trait for objects which are sound to have memory bound to them in their
 /// current state.
-pub trait BindMemory: NeedsMemory {
+pub trait BindMemory<Access: MemoryAccess>: HasMemoryRequirements {
     unsafe fn bind_memory(
         self,
         device: &Device,
-        info: <Self as NeedsMemory>::BindInfo<'_>,
-    ) -> Result<Self::Bound, ()>;
+        memory: &mut Memory<Access>,
+        offset: u64,
+    ) -> Result<Self::Bound, vk::Result>;
 }
-impl<Usage: usage::BufferUsage> NeedsMemory for buffer::Buffer<Usage> {
-    type BindInfo<'a> = vk::BindBufferMemoryInfo<'a>;
+impl<Usage: usage::BufferUsage> HasMemoryRequirements for buffer::Buffer<Usage> {
     type Bound = Self;
     unsafe fn memory_requirements(&self, device: &Device) -> vk::MemoryRequirements {
         device.0.get_buffer_memory_requirements(self.handle())
@@ -62,21 +59,65 @@ impl<
     Dim: image::Dimensionality,
     Format: format::Format,
     Samples: image::ImageSamples,
-> NeedsMemory for image::Image<Usage, Dim, Format, Samples>
+> HasMemoryRequirements for image::Image<Usage, Dim, Format, Samples>
 {
-    type BindInfo<'a> = vk::BindImageMemoryInfo<'a>;
     type Bound = Self;
     unsafe fn memory_requirements(&self, device: &Device) -> vk::MemoryRequirements {
         device.0.get_image_memory_requirements(self.handle())
     }
 }
-impl<T: NeedsMemory> BindMemory for Virtual<T> {
+impl<Usage: usage::BufferUsage, Access: NonTransientAccess> BindMemory<Access>
+    for Virtual<buffer::Buffer<Usage>>
+{
     unsafe fn bind_memory(
         self,
         device: &Device,
-        info: <Self as NeedsMemory>::BindInfo<'_>,
-    ) -> Result<Self::Bound, ()> {
-        todo!()
+        memory: &mut Memory<Access>,
+        offset: u64,
+    ) -> Result<Self::Bound, vk::Result> {
+        device
+            .0
+            .bind_buffer_memory(self.0.handle(), memory.handle(), offset)
+            .map(|()| self.0)
+    }
+}
+impl<
+    Usage: usage::ImageUsage,
+    Dim: image::Dimensionality,
+    Format: format::Format,
+    Samples: image::ImageSamples,
+    Access: NonTransientAccess,
+> BindMemory<Access> for Virtual<image::Image<Usage, Dim, Format, Samples>>
+{
+    unsafe fn bind_memory(
+        self,
+        device: &Device,
+        memory: &mut Memory<Access>,
+        offset: u64,
+    ) -> Result<Self::Bound, vk::Result> {
+        device
+            .0
+            .bind_image_memory(self.0.handle(), memory.handle(), offset)
+            .map(|()| self.0)
+    }
+}
+impl<
+    Usage: usage::ImageSuperset<usage::TransientAttachment>,
+    Dim: image::Dimensionality,
+    Format: format::Format,
+    Samples: image::ImageSamples,
+> BindMemory<LazilyAllocated> for Virtual<image::Image<Usage, Dim, Format, Samples>>
+{
+    unsafe fn bind_memory(
+        self,
+        device: &Device,
+        memory: &mut Memory<LazilyAllocated>,
+        offset: u64,
+    ) -> Result<Self::Bound, vk::Result> {
+        device
+            .0
+            .bind_image_memory(self.0.handle(), memory.handle(), offset)
+            .map(|()| self.0)
     }
 }
 
@@ -86,26 +127,44 @@ crate::typestate_enum! {
     /// Device-locality is not expressed on a typestate level as it has no
     /// implications for correct usage.
     pub enum trait MemoryAccess {
-        /// Typestate for memory which is host-visible and coherent.
-        ///
-        /// Coherent memory does not need explicit flushing or invalidation.
-        pub struct HostCoherent,
-        /// Typestate for memory which is host-visible and cached.
-        ///
-        /// Cached accesses are generally faster than uncached accesses, though
-        /// they are not always [coherent](HostCoherent).
-        pub struct HostCached,
-        /// Typestate for memory which is host visible and both
-        /// [cached](HostCached) and [coherent](HostCoherent).
-        pub struct HostCachedCoherent,
-        /// Typestate for memory which is not host-visible.
-        pub struct Inaccessable,
+        /// Memory types with the `HOST_VISIBLE` flag.
+        pub struct HostVisible,
+        /// Memory types with the `HOST_VISIBLE` flag that have an outstanding
+        /// CPU mapping.
+        pub struct HostMapped,
+        /// Memory types without the `HOST_VISIBLE` flag.
+        pub struct DeviceOnly,
+        /// Memory types with the `LAZILY_ALLOCATED` flag, which can only be
+        /// bound to `Transient` usage images.
+        pub struct LazilyAllocated,
     }
 }
+/// [`MemoryAccess`] types that are not [`LazilyAllocated`].
+pub trait NonTransientAccess: MemoryAccess {}
+impl NonTransientAccess for HostVisible {}
+impl NonTransientAccess for HostMapped {}
+impl NonTransientAccess for DeviceOnly {}
+
 crate::thin_handle!(
     /// An allocation of continuous memory, accessible by the device.
     ///
     /// # Typestates
-    /// * [`Access`](MemoryAccess): Whether the memory is host-visible.
+    /// * [`Access`](MemoryAccess): Whether the memory is host-visible or
+    ///   currently mapped.
     pub struct Memory<Access: MemoryAccess>(vk::DeviceMemory);
 );
+/// Convert a Range type to a `(offset, size)` tuple, where the resulting `size`
+/// may be the special `WHOLE_SIZE` constant.
+pub(crate) fn range_to_offset_size(range: impl core::ops::RangeBounds<u64>) -> (u64, u64) {
+    let offset = match range.start_bound().cloned() {
+        core::ops::Bound::Unbounded => 0,
+        core::ops::Bound::Included(x) => x,
+        core::ops::Bound::Excluded(x) => x.strict_add(1),
+    };
+    let size = match range.end_bound().cloned() {
+        core::ops::Bound::Unbounded => vk::WHOLE_SIZE,
+        core::ops::Bound::Included(x) => x.strict_sub(offset).strict_add(1),
+        core::ops::Bound::Excluded(x) => x.strict_sub(offset),
+    };
+    (offset, size)
+}

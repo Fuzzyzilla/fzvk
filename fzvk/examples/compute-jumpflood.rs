@@ -10,12 +10,6 @@
 //! levels are boosted in an external image editor).
 use std::num::NonZero;
 
-/// Don't let the compiler see that we're unconditionally panic'ing, as that
-/// turns off a bunch of checks!
-fn todo<T>() -> T {
-    todo!()
-}
-
 mod import {
     fzvk_shader::glsl! {
         r#"
@@ -121,13 +115,22 @@ mod pingpong {
     }
 }
 
+trait RequiredMemoryFlags: memory::MemoryAccess {
+    const REQUIRED_FLAGS: vk::MemoryPropertyFlags;
+}
+impl RequiredMemoryFlags for memory::HostVisible {
+    const REQUIRED_FLAGS: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::HOST_VISIBLE;
+}
+impl RequiredMemoryFlags for memory::DeviceOnly {
+    const REQUIRED_FLAGS: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::empty();
+}
+
 // A terrible, no-good allocation strategy.
-unsafe fn allocate_naive(
+unsafe fn allocate_naive<Access: RequiredMemoryFlags>(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     device: &ash::Device,
     requirements: vk::MemoryRequirements,
-    host_accessable: bool,
-) -> Result<vk::DeviceMemory> {
+) -> Result<memory::Memory<Access>> {
     // Choose the first type that fits requirements, regardless of heap.
     let mut bits = requirements.memory_type_bits;
     let index = memory_properties
@@ -150,11 +153,10 @@ unsafe fn allocate_naive(
             if memory_properties.property_flags.as_raw() & !ACCEPTED.as_raw() != 0 {
                 return false;
             }
-            // If needs host accessible, bail if missing that flag.
-            if host_accessable
-                && !memory_properties
-                    .property_flags
-                    .intersects(vk::MemoryPropertyFlags::HOST_VISIBLE)
+            // If missing any required flags, bail.
+            if !memory_properties
+                .property_flags
+                .contains(Access::REQUIRED_FLAGS)
             {
                 return false;
             }
@@ -171,6 +173,7 @@ unsafe fn allocate_naive(
         )
     }
     .map_err(Into::into)
+    .map(|mem| unsafe { memory::Memory::from_handle(mem) }.unwrap())
 }
 
 use anyhow::Result;
@@ -189,9 +192,9 @@ pub fn main() -> Result<()> {
     }
     // =========================================================================================
     // Create an instance.
-    let entry = ash::Entry::linked();
-    let instance = unsafe {
-        let has_portability = entry
+    let ash_entry = ash::Entry::linked();
+    let ash_instance = unsafe {
+        let has_portability = ash_entry
             .enumerate_instance_extension_properties(None)?
             .iter()
             .any(|ext| {
@@ -208,7 +211,7 @@ pub fn main() -> Result<()> {
             Default::default()
         };
 
-        entry.create_instance(
+        ash_entry.create_instance(
             &vk::InstanceCreateInfo::default()
                 .enabled_extension_names(instance_extensions)
                 .flags(flags),
@@ -220,13 +223,13 @@ pub fn main() -> Result<()> {
     // * a compute queue
     // * storage support for R8Unorm, RG8Uint.
     let (phys_device, ash_device, queue, queue_family_index) = unsafe {
-        let phys_devices = instance.enumerate_physical_devices()?;
+        let phys_devices = ash_instance.enumerate_physical_devices()?;
 
         let (phys_device, family_index, is_portability) = phys_devices
             .iter()
             // Check it has all the features we need:
             .filter(|&&phys| {
-                let r8unorm = instance
+                let r8unorm = ash_instance
                     .get_physical_device_format_properties(phys, format::R8_UINT::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
@@ -234,7 +237,7 @@ pub fn main() -> Result<()> {
                 if !r8unorm {
                     return false;
                 }
-                instance
+                ash_instance
                     .get_physical_device_format_properties(phys, format::R16G16_UINT::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
@@ -242,7 +245,7 @@ pub fn main() -> Result<()> {
             })
             // Find the queue type we need, or bail:
             .filter_map(|&phys| {
-                let queues = instance.get_physical_device_queue_family_properties(phys);
+                let queues = ash_instance.get_physical_device_queue_family_properties(phys);
                 let queue = queues
                     .iter()
                     .position(|queue| queue.queue_flags.intersects(vk::QueueFlags::COMPUTE))?
@@ -251,7 +254,9 @@ pub fn main() -> Result<()> {
             })
             // Check if we need to enable portability_subset:
             .filter_map(|(phys, family_index)| {
-                let exts = instance.enumerate_device_extension_properties(phys).ok()?;
+                let exts = ash_instance
+                    .enumerate_device_extension_properties(phys)
+                    .ok()?;
                 let is_portability = exts.iter().any(|ext| {
                     ext.extension_name_as_c_str() == Ok(ash::khr::portability_subset::NAME)
                 });
@@ -269,7 +274,7 @@ pub fn main() -> Result<()> {
             &[]
         };
 
-        let device = instance.create_device(
+        let device = ash_instance.create_device(
             phys_device,
             &vk::DeviceCreateInfo::default()
                 .queue_create_infos(&[vk::DeviceQueueCreateInfo::default()
@@ -346,51 +351,42 @@ pub fn main() -> Result<()> {
 
         // =========================================================================================
         // Allocate memory for the buffers and images.
-        let memory_properties = instance.get_physical_device_memory_properties(phys_device);
+        let memory_properties = ash_instance.get_physical_device_memory_properties(phys_device);
         // See which memory types we're compatible with.
-        let ash_buffer_memory = allocate_naive(
+        let mut buffer_memory = allocate_naive::<memory::HostVisible>(
             &memory_properties,
             &ash_device,
-            ash_device.get_buffer_memory_requirements(buffer.handle()),
-            true,
+            device.memory_requirements(&buffer),
         )?;
-        let ash_reference_memory = allocate_naive(
+        let mut reference_memory = allocate_naive::<memory::DeviceOnly>(
             &memory_properties,
             &ash_device,
-            ash_device.get_image_memory_requirements(reference_image.handle()),
-            false,
+            device.memory_requirements(&reference_image),
         )?;
-        let ash_pingpong_memory = allocate_naive(
+        let mut pingpong_memory = allocate_naive::<memory::DeviceOnly>(
             &memory_properties,
             &ash_device,
-            ash_device.get_image_memory_requirements(pingpong_array.handle()),
-            false,
-        )?;
-        ash_device.bind_buffer_memory(buffer.handle(), ash_buffer_memory, 0)?;
-        ash_device.bind_image_memory(reference_image.handle(), ash_reference_memory, 0)?;
-        ash_device.bind_image_memory(pingpong_array.handle(), ash_pingpong_memory, 0)?;
-        let buffer = buffer.assume_backed();
-        let reference_image = reference_image.assume_backed();
-        let pingpong_array = pingpong_array.assume_backed();
-
-        let buffer_mapping = ash_device.map_memory(
-            ash_buffer_memory,
-            0,
-            output_size_bytes.get(),
-            vk::MemoryMapFlags::empty(),
+            device.memory_requirements(&pingpong_array),
         )?;
 
-        let buffer_map_range = vk::MappedMemoryRange::default()
-            .memory(ash_buffer_memory)
-            .offset(0)
-            .size(vk::WHOLE_SIZE);
-        let buffer_mapping = core::slice::from_raw_parts_mut(
-            buffer_mapping.cast::<u8>(),
-            output_size_bytes.get() as usize,
-        );
-        buffer_mapping[..image.len()].copy_from_slice(&image);
-        // Make the written values visible to the device.
-        ash_device.flush_mapped_memory_ranges(&[buffer_map_range])?;
+        let buffer = device.bind_memory(buffer, &mut buffer_memory, 0)?;
+        let reference_image = device.bind_memory(reference_image, &mut reference_memory, 0)?;
+        let pingpong_array = device.bind_memory(pingpong_array, &mut pingpong_memory, 0)?;
+
+        // Map and upload the image to vulkan memory.
+        let (mut buffer_memory, buffer_mapping_ptr) = device
+            .map_memory(buffer_memory, ..)
+            .map_err(|(_, err)| err)?;
+
+        // Convert the raw pointer into a slice, and copy the image into it.
+
+        // WARNING: It is pivotal that this reference is short lived. It is
+        // unsound to hold onto it during the time period where the device may
+        // be accessing the memory (e.g. after the queue submission, before the
+        // fence wait and invalidation operations).
+        std::slice::from_raw_parts_mut(buffer_mapping_ptr, image.len()).copy_from_slice(&image);
+        // Make the written values available to the host domain.
+        device.flush_memory(&mut buffer_memory, ..(image.len() as u64))?;
 
         let reference_image_view = device.create_image_view(
             &reference_image,
@@ -426,19 +422,23 @@ pub fn main() -> Result<()> {
                 None,
             )
             .unwrap();
-        let ash_pipeline_layout = ash_device
-            .create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .push_constant_ranges(&[vk::PushConstantRange::default()
-                        .size(4)
-                        .offset(0)
-                        .stage_flags(vk::ShaderStageFlags::COMPUTE)])
-                    // Uses two sets of the same layout
-                    .set_layouts(&[ash_descriptor_set_layout, ash_descriptor_set_layout])
-                    .flags(vk::PipelineLayoutCreateFlags::empty()),
-                None,
-            )
-            .unwrap();
+        let pipeline_layout = {
+            let ash_pipeline_layout = ash_device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .push_constant_ranges(&[vk::PushConstantRange::default()
+                            .size(4)
+                            .offset(0)
+                            .stage_flags(vk::ShaderStageFlags::COMPUTE)])
+                        // Uses two sets of the same layout
+                        .set_layouts(&[ash_descriptor_set_layout, ash_descriptor_set_layout])
+                        .flags(vk::PipelineLayoutCreateFlags::empty()),
+                    None,
+                )
+                .unwrap();
+            fzvk::PipelineLayout::from_handle(ash_pipeline_layout).unwrap()
+        };
+
         let ash_descriptor_pool = ash_device
             .create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -510,11 +510,11 @@ pub fn main() -> Result<()> {
             None,
             [
                 ComputePipelineCreateInfo {
-                    layout: &ash_pipeline_layout,
+                    layout: &pipeline_layout.handle(),
                     shader: import_shader,
                 },
                 ComputePipelineCreateInfo {
-                    layout: &ash_pipeline_layout,
+                    layout: &pipeline_layout.handle(),
                     shader: pingpong_shader,
                 },
             ],
@@ -563,15 +563,9 @@ pub fn main() -> Result<()> {
             [buffer.barrier()],
             pingpong_image_ref.reinitialize_as(layout::General),
         );
-        // Block transfer until the buffer is updated by the host.
-        device.barrier(
-            &mut recording,
-            barrier::Host::WRITE,
-            barrier::Transfer::READ,
-            [buffer.barrier()],
-            (),
-        );
-        // Import the image from the host buffer.
+        // Import the image from the host buffer. The queueSubmit of this
+        // commandbuffer creates an implicit domain transfer, making the host
+        // writes available and visible to the device.
         device.copy_buffer_to_image(
             &mut recording,
             &buffer,
@@ -594,22 +588,19 @@ pub fn main() -> Result<()> {
                 [],
                 reference_image_ref.transition(layout::General),
             );
-        ash_device.cmd_bind_pipeline(
-            recording.handle(),
-            vk::PipelineBindPoint::COMPUTE,
-            import_pipe.handle(),
-        );
-        ash_device.cmd_push_constants(
-            recording.handle(),
-            ash_pipeline_layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &0u32.to_ne_bytes(),
-        );
+        device
+            .bind_pipeline(&mut recording, &import_pipe)
+            .push_constants(
+                &mut recording,
+                &pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &[0u32.into()],
+            );
         ash_device.cmd_bind_descriptor_sets(
             recording.handle(),
             vk::PipelineBindPoint::COMPUTE,
-            ash_pipeline_layout,
+            pipeline_layout.handle(),
             0,
             &[
                 ash_reference_descriptor_set,
@@ -623,12 +614,8 @@ pub fn main() -> Result<()> {
             .dispatch(
                 &mut recording,
                 [extent.width, extent.height, NonZero::<u32>::MIN],
-            );
-        ash_device.cmd_bind_pipeline(
-            recording.handle(),
-            vk::PipelineBindPoint::COMPUTE,
-            pingpong_pipe.handle(),
-        );
+            )
+            .bind_pipeline(&mut recording, &pingpong_pipe);
 
         let mut readbuf = 0;
 
@@ -649,7 +636,7 @@ pub fn main() -> Result<()> {
             ash_device.cmd_bind_descriptor_sets(
                 recording.handle(),
                 vk::PipelineBindPoint::COMPUTE,
-                ash_pipeline_layout,
+                pipeline_layout.handle(),
                 0,
                 &[
                     ash_pingpong_descriptor_sets[readbuf],
@@ -657,12 +644,12 @@ pub fn main() -> Result<()> {
                 ],
                 &[],
             );
-            ash_device.cmd_push_constants(
-                recording.handle(),
-                ash_pipeline_layout,
+            device.push_constants(
+                &mut recording,
+                &pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                &spread.to_ne_bytes(),
+                &[spread.into()],
             );
 
             device
@@ -694,18 +681,27 @@ pub fn main() -> Result<()> {
         );
         // It's safe to write to the buffer after the read at the start, due to
         // the transfer -> compute shader -> transfer dependency chain.
-        device.copy_image_to_buffer(
-            &mut recording,
-            &pingpong_image_ref,
-            &buffer,
-            [BufferImageCopy {
-                buffer_offset: 0,
-                image_offset: Offset::ORIGIN,
-                image_extent: extent,
-                pitch: BufferPitch::PACKED,
-                layers: SubresourceLayers::new(0, readbuf as u32, NonZero::<u32>::MIN),
-            }],
-        );
+        device
+            .copy_image_to_buffer(
+                &mut recording,
+                &pingpong_image_ref,
+                &buffer,
+                [BufferImageCopy {
+                    buffer_offset: 0,
+                    image_offset: Offset::ORIGIN,
+                    image_extent: extent,
+                    pitch: BufferPitch::PACKED,
+                    layers: SubresourceLayers::new(0, readbuf as u32, NonZero::<u32>::MIN),
+                }],
+            )
+            .barrier(
+                &mut recording,
+                barrier::Transfer::WRITE,
+                // Make the results available to the host domain.
+                barrier::Host::READ,
+                [buffer.barrier()],
+                (),
+            );
 
         device.end_command_buffer(recording)?;
 
@@ -720,20 +716,25 @@ pub fn main() -> Result<()> {
         let fence = device.wait_fence(pending_fence)?;
 
         // =========================================================================================
-        // We can now read the buffer's memory to get our output result! A fence
-        // signal operation creates an everything-to-everything memory
-        // dependency, and flushes all *device* caches, so there is no need for
-        // a final barrier for transfer write -> host read. There *does* still
-        // need to be a host cache invalidation!
-        ash_device.invalidate_mapped_memory_ranges(&[buffer_map_range])?;
+        // We can now read the buffer's memory to get our output result! There
+        // does still need to be a host cache invalidation to make the available
+        // writes *visible*!
+        device.invalidate_memory(&mut buffer_memory, ..)?;
 
         // Export UV image as RGB16U. We have to make a copy to shove the zeroed
         // B channel in, because no image format supports RG format and LA has
         // quirks! Silly!
-        let image_data = bytemuck::cast_slice::<u8, [u16; 2]>(buffer_mapping)
-            .iter()
-            .flat_map(|&[r, g]| [r, g, 0u16])
-            .collect::<Vec<u16>>();
+        let image_data = {
+            let mapped_slice = std::slice::from_raw_parts(
+                buffer_mapping_ptr.cast_const(),
+                output_size_bytes.get() as usize,
+            );
+
+            bytemuck::cast_slice::<u8, [u16; 2]>(mapped_slice)
+                .iter()
+                .flat_map(|&[r, g]| [r, g, 0u16])
+                .collect::<Vec<u16>>()
+        };
         if let Err(err) = ::image::save_buffer(
             out_path,
             bytemuck::cast_slice(&image_data),
@@ -746,13 +747,9 @@ pub fn main() -> Result<()> {
 
         // =========================================================================================
         // Cleanup
-        ash_device.destroy_pipeline_layout(ash_pipeline_layout, None);
+        ash_device.destroy_pipeline_layout(pipeline_layout.into_handle(), None);
         ash_device.destroy_descriptor_pool(ash_descriptor_pool, None);
         ash_device.destroy_descriptor_set_layout(ash_descriptor_set_layout, None);
-
-        ash_device.free_memory(ash_buffer_memory, None);
-        ash_device.free_memory(ash_reference_memory, None);
-        ash_device.free_memory(ash_pingpong_memory, None);
 
         let [pingpong_view_0, pingpong_view_1] = pingpong_views;
         device
@@ -765,10 +762,13 @@ pub fn main() -> Result<()> {
             .destroy_image_view(reference_image_view)
             .destroy_image(pingpong_array)
             .destroy_image(reference_image)
-            .destroy_buffer(buffer);
+            .destroy_buffer(buffer)
+            .free_memory(buffer_memory)
+            .free_memory(reference_memory)
+            .free_memory(pingpong_memory);
 
         ash_device.destroy_device(None);
-        instance.destroy_instance(None);
+        ash_instance.destroy_instance(None);
     }
 
     Ok(())

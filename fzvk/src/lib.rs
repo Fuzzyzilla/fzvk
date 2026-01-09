@@ -803,9 +803,10 @@ impl<'device> Device<'device> {
         pool: &mut CommandPool,
         _: Level,
     ) -> Result<[CommandBuffer<Level>; N], AllocationError> {
-        // No good way to statically assert this, but because it is known at
-        // const-time this is definitely compiled out~
-        assert_ne!(N, 0);
+        // This is a const-time branch, and does not exist at runtime.
+        if N == 0 {
+            return Ok(core::array::from_fn(|_| unreachable!()));
+        }
         let vec = self
             .0
             .allocate_command_buffers(
@@ -825,11 +826,11 @@ impl<'device> Device<'device> {
         pool: &mut CommandPool,
         buffers: [CommandBuffer<Level>; N],
     ) -> &Self {
-        // No good way to statically assert this, but because it is known at
-        // const-time this is definitely compiled out~
-        assert_ne!(N, 0);
-        self.0
-            .free_command_buffers(pool.handle(), ThinHandle::handles_of(&buffers));
+        // This is a const-time branch, and does not exist at runtime.
+        if N != 0 {
+            self.0
+                .free_command_buffers(pool.handle(), ThinHandle::handles_of(&buffers));
+        }
         self
     }
     /// Create a buffer. The `BufferUsageFlags` are passed at compile time:
@@ -939,6 +940,120 @@ impl<'device> Device<'device> {
     pub unsafe fn destroy_image(&self, image: impl ThinHandle<Handle = vk::Image>) -> &Self {
         self.0.destroy_image(image.into_handle(), None);
         self
+    }
+    pub unsafe fn memory_requirements<Resource: memory::HasMemoryRequirements>(
+        &self,
+        virt: &Resource,
+    ) -> vk::MemoryRequirements {
+        virt.memory_requirements(self)
+    }
+    pub unsafe fn bind_memory<Resource, Access>(
+        &self,
+        virt: memory::Virtual<Resource>,
+        memory: &mut memory::Memory<Access>,
+        offset: u64,
+    ) -> Result<<memory::Virtual<Resource> as memory::HasMemoryRequirements>::Bound, vk::Result>
+    where
+        Access: memory::MemoryAccess,
+        Resource: memory::HasMemoryRequirements,
+        memory::Virtual<Resource>: memory::BindMemory<Access>,
+    {
+        use memory::BindMemory;
+        virt.bind_memory(self, memory, offset)
+    }
+    pub unsafe fn free_memory<Access: memory::MemoryAccess>(
+        &self,
+        memory: memory::Memory<Access>,
+    ) -> &Self {
+        self.0.free_memory(memory.handle(), None);
+        self
+    }
+    pub unsafe fn memory_commitment(
+        &self,
+        memory: &memory::Memory<memory::LazilyAllocated>,
+    ) -> u64 {
+        self.0.get_device_memory_commitment(memory.handle())
+    }
+    /// Attempt to map a memory region. A host-accessible pointer is returned
+    /// referencing the memory.
+    ///
+    /// Cache control of memory visible through the pointer is left to the
+    /// client code. Use [`flush_memory`](Self::flush_memory) and
+    /// [`invalidate_memory`](Self::invalidate_memory) to ensure that reads and
+    /// writes observe expected values.
+    ///
+    /// # Errors
+    /// In the case an error occurs, the memory region is guaranteed to still be
+    /// in the un-mapped state.
+    pub unsafe fn map_memory(
+        &self,
+        memory: memory::Memory<memory::HostVisible>,
+        range: impl core::ops::RangeBounds<u64>,
+    ) -> Result<
+        (memory::Memory<memory::HostMapped>, *mut u8),
+        (memory::Memory<memory::HostVisible>, vk::Result),
+    > {
+        let (offset, size) = memory::range_to_offset_size(range);
+        match self
+            .0
+            .map_memory(memory.handle(), offset, size, vk::MemoryMapFlags::empty())
+        {
+            Ok(ptr) => Ok((memory.with_state(), ptr.cast())),
+            Err(err) => Err((memory, err)),
+        }
+    }
+    /// Flush the host cache of the given range of mapped memory. The range in
+    /// interpreted as relative to the opaque memory object, not relative to the
+    /// mapped region.
+    ///
+    /// This makes previous writes to the memory *available* to the host memory
+    /// domain, which can then be made *available* to the device memory domain
+    /// via the execution of a corresponding
+    /// [`Host::WRITE`](sync::barrier::Host::WRITE) pipeline
+    /// [barrier](Self::barrier). **This requires device synchronization** -
+    /// cache control is only half the equation!
+    pub unsafe fn flush_memory<'this>(
+        &'this self,
+        memory: &'_ mut memory::Memory<memory::HostMapped>,
+        range: impl core::ops::RangeBounds<u64>,
+    ) -> Result<&'this Self, vk::Result> {
+        let (offset, size) = memory::range_to_offset_size(range);
+        self.0
+            .flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default()
+                .memory(memory.handle())
+                .offset(offset)
+                .size(size)])
+            .map(|()| self)
+    }
+    /// Invalidate the host cache of the given range of mapped memory. The range
+    /// in interpreted as relative to the opaque memory object, not relative to
+    /// the mapped region.
+    ///
+    /// This makes previous device writes to the memory, which have been made
+    /// *available* to the host memory domain via a corresponding
+    /// [`Host::READ`](sync::barrier::Host::READ) pipeline
+    /// [barrier](Self::barrier), *visible* through the memory's mapped pointer.
+    /// **This requires device synchronization** via a [`Fence`] - cache control
+    /// is only half the equation!
+    pub unsafe fn invalidate_memory<'this>(
+        &'this self,
+        memory: &'_ mut memory::Memory<memory::HostMapped>,
+        range: impl core::ops::RangeBounds<u64>,
+    ) -> Result<&'this Self, vk::Result> {
+        let (offset, size) = memory::range_to_offset_size(range);
+        self.0
+            .invalidate_mapped_memory_ranges(&[vk::MappedMemoryRange::default()
+                .memory(memory.handle())
+                .offset(offset)
+                .size(size)])
+            .map(|()| self)
+    }
+    pub unsafe fn unmap_memory(
+        &self,
+        memory: memory::Memory<memory::HostMapped>,
+    ) -> memory::Memory<memory::HostVisible> {
+        self.0.unmap_memory(memory.handle());
+        memory.with_state()
     }
     /// See [`Self::create_image_view_mutable_format`] to utilize
     /// `MUTABLE_FORMAT` image capabilities.
@@ -1246,6 +1361,20 @@ impl<'device> Device<'device> {
             .map_err(AllocationError::from_vk)?;
         // Safety - directly from a ThinHandle, so is known non-null.
         Ok(RecordingBuffer::from_handle_unchecked(buffer.handle()))
+    }
+    pub unsafe fn bind_pipeline<
+        'this,
+        Kind: pipeline::BindPoint,
+        Level: CommandBufferLevel,
+        MaybeInsideRender: CommandBufferState,
+    >(
+        &'this self,
+        buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
+        pipeline: &'_ Pipeline<Kind>,
+    ) -> &'this Self {
+        self.0
+            .cmd_bind_pipeline(buffer.handle(), Kind::BIND_POINT, pipeline.handle());
+        self
     }
     pub unsafe fn push_constants<
         'a,
