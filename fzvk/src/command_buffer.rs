@@ -66,7 +66,7 @@ impl<'a, Level: CommandBufferLevel> From<&'a CommandBuffer<Level>>
     }
 }
 
-pub struct BufferImageCopy<Dim: Dimensionality> {
+pub struct BufferImageCopy<Dim: Dimensionality, AspectMask: crate::format::aspect::AspectMask> {
     /// The minima of the rectangular bound to copy.
     pub image_offset: Dim::Offset,
     /// The size of the rectangular bound to copy.
@@ -77,6 +77,8 @@ pub struct BufferImageCopy<Dim: Dimensionality> {
     pub pitch: Dim::Pitch,
     /// Which mip level, and optionally which layers of an array image, to copy.
     pub layers: Dim::SubresourceLayers,
+    /// Which aspects of the image to copy.
+    pub aspects: AspectMask,
 }
 
 pub trait CommandBufferState {}

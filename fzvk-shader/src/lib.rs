@@ -61,60 +61,56 @@ fn spirv_image_format_to_fzvk_format_path(
             match format {
                 Format::Unknown => "::fzvk::descriptor::AnyColor",
 
-                Format::Rgb10a2ui => "::fzvk::format::A2B10G10R10_UINT_PACK32",
-                Format::Rgb10A2 => "::fzvk::format::A2R10G10B10_UNORM_PACK32",
-                Format::R11fG11fB10f => "::fzvk::format::B10G11R11_UFLOAT_PACK32",
+                Format::Rgb10a2ui => "::fzvk::format::A2Bgr10i",
+                Format::Rgb10A2 => "::fzvk::format::A2Rgb10",
+                Format::R11fG11fB10f => "::fzvk::format::B10Gr11Uf",
 
-                Format::Rgba8i => "::fzvk::format::R8G8B8A8_SINT",
-                Format::Rgba8Snorm => "::fzvk::format::R8G8B8A8_SNORM",
-                Format::Rgba8ui => "::fzvk::format::R8G8B8A8_UINT",
-                Format::Rgba8 => "::fzvk::format::R8G8B8A8_UNORM",
+                Format::Rgba8i => "::fzvk::format::Rgba8i",
+                Format::Rgba8Snorm => "::fzvk::format::Rgba8Inorm",
+                Format::Rgba8ui => "::fzvk::format::Rgba8u",
+                Format::Rgba8 => "::fzvk::format::Rgba8",
 
-                Format::Rg8i => "::fzvk::format::R8G8_SINT",
-                Format::Rg8Snorm => "::fzvk::format::R8G8_SNORM",
-                Format::Rg8ui => "::fzvk::format::R8G8_UINT",
-                Format::Rg8 => "::fzvk::format::R8G8_UNORM",
+                Format::Rg8i => "::fzvk::format::Rg8i",
+                Format::Rg8Snorm => "::fzvk::format::Rg8Inorm",
+                Format::Rg8ui => "::fzvk::format::Rg8u",
+                Format::Rg8 => "::fzvk::format::Rg8",
 
-                Format::R8i => "::fzvk::format::R8_SINT",
-                Format::R8Snorm => "::fzvk::format::R8_SNORM",
-                Format::R8ui => "::fzvk::format::R8_UINT",
-                Format::R8 => "::fzvk::format::R8_UNORM",
+                Format::R8i => "::fzvk::format::R8i",
+                Format::R8Snorm => "::fzvk::format::R8Inorm",
+                Format::R8ui => "::fzvk::format::R8u",
+                Format::R8 => "::fzvk::format::R8",
 
-                Format::Rgba16f => "::fzvk::format::R16G16B16A16_SFLOAT",
-                Format::Rgba16i => "::fzvk::format::R16G16B16A16_SINT",
-                Format::Rgba16Snorm => "::fzvk::format::R16G16B16A16_SNORM",
-                Format::Rgba16ui => "::fzvk::format::R16G16B16A16_UINT",
-                Format::Rgba16 => "::fzvk::format::R16G16B16A16_UNORM",
+                Format::Rgba16f => "::fzvk::format::Rgba16f",
+                Format::Rgba16i => "::fzvk::format::Rgba16i",
+                Format::Rgba16Snorm => "::fzvk::format::Rgba16Inorm",
+                Format::Rgba16ui => "::fzvk::format::Rgba16u",
+                Format::Rgba16 => "::fzvk::format::Rgba16",
 
-                Format::Rg16f => "::fzvk::format::R16G16_SFLOAT",
-                Format::Rg16i => "::fzvk::format::R16G16_SINT",
-                Format::Rg16Snorm => "::fzvk::format::R16G16_SNORM",
-                Format::Rg16ui => "::fzvk::format::R16G16_UINT",
-                Format::Rg16 => "::fzvk::format::R16G16_UNORM",
+                Format::Rg16f => "::fzvk::format::Rg16f",
+                Format::Rg16i => "::fzvk::format::Rg16i",
+                Format::Rg16Snorm => "::fzvk::format::Rg16Inorm",
+                Format::Rg16ui => "::fzvk::format::Rg16u",
+                Format::Rg16 => "::fzvk::format::Rg16",
 
-                Format::R16f => "::fzvk::format::R16_SFLOAT",
-                Format::R16i => "::fzvk::format::R16_SINT",
-                Format::R16Snorm => "::fzvk::format::R16_SNORM",
-                Format::R16ui => "::fzvk::format::R16_UINT",
-                Format::R16 => "::fzvk::format::R16_UNORM",
+                Format::R16f => "::fzvk::format::R16f",
+                Format::R16i => "::fzvk::format::R16i",
+                Format::R16Snorm => "::fzvk::format::R16Inorm",
+                Format::R16ui => "::fzvk::format::R16u",
+                Format::R16 => "::fzvk::format::R16",
 
-                Format::Rgba32f => "::fzvk::format::R32G32B32A32_SFLOAT",
-                Format::Rgba32i => "::fzvk::format::R32G32B32A32_SINT",
-                Format::Rgba32ui => "::fzvk::format::R32G32B32A32_UINT",
+                Format::Rgba32f => "::fzvk::format::Rgba32f",
+                Format::Rgba32i => "::fzvk::format::Rgba32i",
+                Format::Rgba32ui => "::fzvk::format::Rgba32u",
 
-                Format::Rg32f => "::fzvk::format::R32G32_SFLOAT",
-                Format::Rg32i => "::fzvk::format::R32G32_SINT",
-                Format::Rg32ui => "::fzvk::format::R32G32_UINT",
+                Format::Rg32f => "::fzvk::format::Rg32f",
+                Format::Rg32i => "::fzvk::format::Rg32i",
+                Format::Rg32ui => "::fzvk::format::Rg32u",
 
-                Format::R32f => {
-                    "
-                ::fzvk::format::R32_SFLOAT"
-                }
-                Format::R32i => "::fzvk::format::R32_SINT",
-                Format::R32ui => "::fzvk::format::R32_UINT",
-
-                Format::R64i => "::fzvk::format::R64_SINT",
-                Format::R64ui => "::fzvk::format::R64_UINT",
+                Format::R32f => "::fzvk::format::R32f",
+                Format::R32i => "::fzvk::format::R32i",
+                Format::R32ui => "::fzvk::format::R32u",
+                Format::R64i => "::fzvk::format::R64i",
+                Format::R64ui => "::fzvk::format::R64u",
             }
         }
 

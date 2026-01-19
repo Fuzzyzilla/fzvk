@@ -110,7 +110,7 @@ impl ImageUsage for ColorAttachment {
 /// An image that can be attached to a Framebuffer as a depth and/or stencil
 /// attachment.
 pub struct DepthStencilAttachment;
-impl ImageUsage for Uniform {
+impl ImageUsage for DepthStencilAttachment {
     const FLAGS: vk::ImageUsageFlags = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
 }
 /// An image that can be attached to a Framebuffer for transient render

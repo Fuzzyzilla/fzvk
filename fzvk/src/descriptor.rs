@@ -71,10 +71,18 @@ impl FormatRequirement for AnyColor {}
 pub struct AnyDepth;
 impl FormatRequirement for AnyDepth {}
 pub trait SatisfiesFormatRequirement<Format: FormatRequirement>: format::Format {}
-/// All color formats satisfy [`AnyColor`].
-impl<T: format::HasAspect<format::Color>> SatisfiesFormatRequirement<AnyColor> for T {}
-/// All depth formats satisfy [`AnyDepth`].
-impl<T: format::HasAspect<format::Depth>> SatisfiesFormatRequirement<AnyDepth> for T {}
+/// All formats with a color aspect satisfy [`AnyColor`].
+impl<T: format::Format<AspectMask = format::aspect::Color>> SatisfiesFormatRequirement<AnyColor>
+    for T
+{
+}
+/// All formats with a depth aspect satisfy [`AnyDepth`].
+impl<
+    Aspect: format::aspect::AspectSupersetOf<format::aspect::Depth>,
+    T: format::Format<AspectMask = Aspect>,
+> SatisfiesFormatRequirement<AnyDepth> for T
+{
+}
 /// Formats of course satisfy themselves.
 impl<T: format::Format + FormatRequirement> SatisfiesFormatRequirement<T> for T {}
 
@@ -84,67 +92,68 @@ macro_rules! image_formats {
     };
 }
 image_formats! {
-    A2B10G10R10_UINT_PACK32,
-    A2R10G10B10_UNORM_PACK32,
-    B10G11R11_UFLOAT_PACK32,
+    A2Bgr10i,
+    A2Rgb10,
+    B10Gr11Uf,
 
-    R8G8B8A8_SINT,
-    R8G8B8A8_SNORM,
-    R8G8B8A8_UINT,
-    R8G8B8A8_UNORM,
+    Rgba8i,
+    Rgba8Inorm,
+    Rgba8u,
+    Rgba8,
 
-    R8G8_SINT,
-    R8G8_SNORM,
-    R8G8_UINT,
-    R8G8_UNORM,
+    Rg8i,
+    Rg8Inorm,
+    Rg8u,
+    Rg8,
 
-    R8_SINT,
-    R8_SNORM,
-    R8_UINT,
-    R8_UNORM,
+    R8i,
+    R8Inorm,
+    R8u,
+    R8,
 
-    R16G16B16A16_SFLOAT,
-    R16G16B16A16_SINT,
-    R16G16B16A16_SNORM,
-    R16G16B16A16_UINT,
-    R16G16B16A16_UNORM,
+    Rgba16f,
+    Rgba16i,
+    Rgba16Inorm,
+    Rgba16u,
+    Rgba16,
 
-    R16G16_SFLOAT,
-    R16G16_SINT,
-    R16G16_SNORM,
-    R16G16_UINT,
-    R16G16_UNORM,
+    Rg16f,
+    Rg16i,
+    Rg16Inorm,
+    Rg16u,
+    Rg16,
 
-    R16_SFLOAT,
-    R16_SINT,
-    R16_SNORM,
-    R16_UINT,
-    R16_UNORM,
+    R16f,
+    R16i,
+    R16Inorm,
+    R16u,
+    R16,
 
-    R32G32B32A32_SFLOAT,
-    R32G32B32A32_SINT,
-    R32G32B32A32_UINT,
+    Rgba32f,
+    Rgba32i,
+    Rgba32u,
 
-    R32G32_SFLOAT,
-    R32G32_SINT,
-    R32G32_UINT,
+    Rg32f,
+    Rg32i,
+    Rg32u,
 
-    R32_SFLOAT,
-    R32_SINT,
-    R32_UINT,
-    R64_SINT,
-    R64_UINT,
+    R32f,
+    R32i,
+    R32u,
+    R64i,
+    R64u,
 }
 
 pub unsafe trait HasResource<Ty: DescriptorType> {}
-unsafe impl<Usage, Dim, Format, Samples> HasResource<StorageImage>
-    for image::ImageView<Usage, Dim, Format, Samples>
+unsafe impl<Usage, Dim, Format, Samples, Aspect> HasResource<StorageImage>
+    for image::ImageView<Usage, Dim, Format, Samples, Aspect>
 where
     Usage: usage::ImageSuperset<usage::Storage>,
     // FIXME: bounds on these?
     Dim: image::Dimensionality,
     Format: format::Format,
     Samples: image::ImageSamples,
+    Aspect: format::aspect::AspectMask,
 {
 }
 pub trait DescriptorBinding {

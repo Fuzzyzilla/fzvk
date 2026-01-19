@@ -1,14 +1,15 @@
 //! Fences, Semaphores, Barriers galore!
-use super::{ShaderStage, ThinHandle, vk};
+use super::{ThinHandle, vk};
 
 pub mod barrier {
     use super::vk;
     #[derive(Copy, Clone)]
+    #[repr(transparent)]
     pub struct NonZeroStageFlags(core::num::NonZero<u32>);
     macro_rules! nonzero_stages {
         {$($name:ident,)+} => {
             impl NonZeroStageFlags {
-                $(const $name : Self = Self(::core::num::NonZero::new(::ash::vk::PipelineStageFlags::$name.as_raw()).unwrap());)+
+                $(pub const $name : Self = Self(::core::num::NonZero::new(::ash::vk::PipelineStageFlags::$name.as_raw()).unwrap());)+
             }
         };
     }
@@ -494,7 +495,7 @@ impl Semaphore<Waiting> {
     ///         &mut queue,
     ///         [
     ///             signaling_semaphore
-    ///                 .into_wait(vk::PipelineStageFlags::TOP_OF_PIPE)
+    ///                 .into_wait(barrier::NonZeroStageFlags::ALL_COMMANDS)
     ///         ],
     ///         &[command_buffer.reference()],
     ///         [],

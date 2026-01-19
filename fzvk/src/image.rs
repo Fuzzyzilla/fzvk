@@ -2,7 +2,7 @@
 use crate::{
     ThinHandle,
     buffer::{BufferPitch, RowPitch, RowSlicePitch},
-    format,
+    format::{self, aspect::AspectMask},
     usage::ImageUsage,
     vk,
 };
@@ -710,7 +710,7 @@ impl<
             from: Layout::LAYOUT,
             image: self.0,
             subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                aspect_mask: <Format::AspectMask as AspectMask>::ALL.aspect_mask(),
                 base_mip_level: 0,
                 level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
@@ -738,7 +738,7 @@ impl<
             from: vk::ImageLayout::UNDEFINED,
             image: self.0,
             subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                aspect_mask: <Format::AspectMask as AspectMask>::ALL.aspect_mask(),
                 base_mip_level: 0,
                 level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
@@ -760,7 +760,7 @@ impl<
             from: Layout::LAYOUT,
             image: self.0,
             subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: <Format::Aspect as format::Aspect>::ASPECT,
+                aspect_mask: <Format::AspectMask as AspectMask>::ALL.aspect_mask(),
                 base_mip_level: 0,
                 level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
@@ -878,8 +878,10 @@ crate::thin_handle! {
     /// * `Format`: The texel format of the image.
     /// * `Samples`: Whether the image is [single-](SingleSampled) or
     ///   [multi-](MultiSampled)sampled.
+    /// * `Aspects`: Which Aspect flags this view references from it's parent
+    ///   image, which *may* be a subset of the aspects of `Format`.
     #[must_use = "dropping the handle will not destroy the view and may leak resources"]
-    pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples>(
+    pub struct ImageView<Usage: ImageUsage, Dim: Dimensionality, Format: format::Format, Samples: ImageSamples, Aspects: format::aspect::AspectMask>(
         vk::ImageView
     );
 }
@@ -931,7 +933,7 @@ pub mod layout {
     impl<
         Usage: crate::usage::ImageSuperset<crate::usage::ColorAttachment>,
         Dim: Dimensionality,
-        Format: format::HasAspect<format::Color>,
+        Format: format::Format<AspectMask = format::aspect::Color>,
         Samples: ImageSamples,
     > CanTransitionIntoLayout<ColorAttachment> for Image<Usage, Dim, Format, Samples>
     {

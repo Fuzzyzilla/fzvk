@@ -23,7 +23,7 @@
 //! A fully-named image type thus looks something like:
 //! ```no_run
 //! # use fzvk::*;
-//! let image : Image<(Storage, TransferDst), D2Array, ColorFormat, SingleSampled> = todo!();
+//! let image : Image<(Storage, TransferDst), D2Array, format::Rgba8Srgb, SingleSampled> = todo!();
 //! ```
 //! Since each of these facts are almost always known at compile time and have
 //! large implications for valid usage of the resource, they are tracked at
@@ -172,6 +172,7 @@ pub use image::*;
 pub mod memory;
 pub mod pipeline;
 pub use pipeline::*;
+pub mod sampler;
 pub mod usage;
 pub use usage::*;
 pub mod sync;
@@ -216,7 +217,14 @@ impl From<Bool32> for bool {
         value.get()
     }
 }
-
+/// An enum type that transparently represents a vulkan enum.
+pub unsafe trait VkEnum: Sized {
+    type Enum;
+    fn into_vk(self) -> Self::Enum {
+        // We have to use
+        unsafe { core::mem::transmute_copy(&self) }
+    }
+}
 /// An error that occurs when the vulkan implementation must allocate memory,
 /// e.g. when creating a new handle (image, buffer, etc.) or begining a command
 /// buffer.
@@ -333,6 +341,31 @@ mod macro_use {
                     const $const_name: $const_ty = <$const_ty>::from_raw($(<$name as $trait_name>::$const_name.as_raw())|*);
                 }
             )+
+        };
+    }
+
+    /// Create an enum that trivially converts to a vulkan equivalent.
+    /// ```ignore
+    /// vk_enum!(pub enum Filter: vk::Filter {
+    ///     Nearest = NEAREST,
+    ///     Linear = LINEAR,
+    /// });
+    /// ```
+    #[macro_export]
+    macro_rules! vk_enum {
+        ($(#[$meta:meta])*
+            pub enum $name:ident: $vk_name:ty {
+            $($key:ident = $value:ident,)*
+        }) => {
+            $(#[$meta])*
+            #[derive(Clone, Copy)]
+            #[repr(i32)]
+            pub enum $name {
+                $($key = <$vk_name>::$value.as_raw(),)*
+            }
+            unsafe impl $crate::VkEnum for $name {
+                type Enum = $vk_name;
+            }
         };
     }
 }
@@ -889,9 +922,7 @@ impl<'device> Device<'device> {
     ///             height: NonZero::new(128).unwrap()
     ///         },
     ///         MipCount::ONE,
-    ///         // ColorFormat makes a COLOR_ASPECT image.
-    ///         // You can also use DepthStencilFormat
-    ///         ColorFormat::Rgba8Unorm,
+    ///         format::R8G8B8A8_UNORM,
     ///         // Makes a non-multisampled image.
     ///         // You can also use the MultiSampled enum.
     ///         SingleSampled,
@@ -1063,6 +1094,7 @@ impl<'device> Device<'device> {
         ViewDim: CanView<ImageDim>,
         Format: format::Format,
         Samples: ImageSamples,
+        ViewAspect: format::aspect::AspectMask,
     >(
         &self,
         image: &Image<Usage, ImageDim, Format, Samples>,
@@ -1070,13 +1102,18 @@ impl<'device> Device<'device> {
         dim: ViewDim,
         component_mapping: ComponentMapping,
         subresource_range: ImageDim::SubresourceRange,
-    ) -> Result<ImageView<Usage, ViewDim, Format, Samples>, AllocationError> {
+        aspect_ty: format::aspect::ViewAspects<ViewAspect>,
+    ) -> Result<ImageView<Usage, ViewDim, Format, Samples, ViewAspect>, AllocationError>
+    where
+        Format::AspectMask: format::aspect::AspectSupersetOf<ViewAspect>,
+    {
         // Safety - Image and view statically forced to have same format.
-        self.create_image_view_mutable_format::<Usage, ImageDim, ViewDim, Format, Format, Samples>(
+        self.create_image_view_mutable_format::<Usage, ImageDim, ViewDim, Format, Format, Samples, ViewAspect>(
             image,
             dim,
             component_mapping,
             subresource_range,
+            aspect_ty,
         )
     }
     /// Safety - If the `ImageFormat` and `ViewFormat` differ, the image must
@@ -1090,6 +1127,7 @@ impl<'device> Device<'device> {
         ImageFormat: format::Format,
         ViewFormat: format::CompatibleWith<ImageFormat>,
         Samples: ImageSamples,
+        ViewAspect: format::aspect::AspectMask,
     >(
         &self,
         image: &Image<Usage, ImageDim, ImageFormat, Samples>,
@@ -1097,17 +1135,18 @@ impl<'device> Device<'device> {
         _dim: ViewDim,
         component_mapping: ComponentMapping,
         subresource_range: ImageDim::SubresourceRange,
-    ) -> Result<ImageView<Usage, ViewDim, ViewFormat, Samples>, AllocationError> {
+        _aspect_ty: format::aspect::ViewAspects<ViewAspect>,
+    ) -> Result<ImageView<Usage, ViewDim, ViewFormat, Samples, ViewAspect>, AllocationError>
+    where
+        ImageFormat::AspectMask: format::aspect::AspectSupersetOf<ViewAspect>,
+    {
         self.0
             .create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image.handle())
                     .format(ViewFormat::FORMAT)
                     .view_type(ViewDim::VIEW_TYPE)
-                    .subresource_range(
-                        subresource_range
-                            .subresource_range(<ImageFormat::Aspect as format::Aspect>::ASPECT),
-                    )
+                    .subresource_range(subresource_range.subresource_range(ViewAspect::ALL_FLAGS))
                     .components(component_mapping.into()),
                 None,
             )
@@ -1119,12 +1158,69 @@ impl<'device> Device<'device> {
         Dim: Dimensionality,
         Format: format::Format,
         Samples: ImageSamples,
+        Aspect: format::aspect::AspectMask,
     >(
         &self,
-        view: ImageView<Usage, Dim, Format, Samples>,
+        view: ImageView<Usage, Dim, Format, Samples, Aspect>,
     ) -> &Self {
         self.0.destroy_image_view(view.into_handle(), None);
         self
+    }
+    pub unsafe fn create_sampler(
+        &self,
+        min_filter: sampler::Filter,
+        mag_filter: sampler::Filter,
+        mipmap_mode: sampler::Filter,
+        lod: impl core::ops::RangeBounds<f32>,
+        lod_bias: f32,
+        address_mode: sampler::AddressMode3,
+        border_color: sampler::BorderColor,
+        anisotropy: Option<sampler::Anisotropy>,
+        compare_op: Option<sampler::CompareOp>,
+    ) -> Result<sampler::Sampler, AllocationError> {
+        use core::ops::Bound;
+        // Weirdly, the spec does not mention valid ranges, or even that NaN or
+        // Infinity are disallowed. Yippee?
+        let min_lod = match lod.start_bound().cloned() {
+            Bound::Unbounded => 0.0,
+            // FIXME: is this even meaningful lol.
+            Bound::Excluded(x) => x.next_up(),
+            Bound::Included(x) => x,
+        };
+        let max_lod = match lod.end_bound().cloned() {
+            Bound::Unbounded => vk::LOD_CLAMP_NONE,
+            // FIXME: is this even meaningful lol.
+            Bound::Excluded(x) => x.next_down(),
+            Bound::Included(x) => x,
+        };
+        self.0
+            .create_sampler(
+                &vk::SamplerCreateInfo {
+                    flags: vk::SamplerCreateFlags::empty(),
+                    mag_filter: mag_filter.into_vk(),
+                    min_filter: min_filter.into_vk(),
+                    mipmap_mode: match mipmap_mode {
+                        sampler::Filter::Linear => vk::SamplerMipmapMode::LINEAR,
+                        sampler::Filter::Nearest => vk::SamplerMipmapMode::NEAREST,
+                    },
+                    address_mode_u: address_mode.u.into_vk(),
+                    address_mode_v: address_mode.v.into_vk(),
+                    address_mode_w: address_mode.w.into_vk(),
+                    mip_lod_bias: lod_bias,
+                    anisotropy_enable: anisotropy.is_some() as u32,
+                    max_anisotropy: anisotropy.map_or(0.0, sampler::Anisotropy::get),
+                    compare_enable: compare_op.is_some() as u32,
+                    compare_op: compare_op.unwrap_or(sampler::CompareOp::Never).into_vk(),
+                    min_lod,
+                    max_lod,
+                    border_color: border_color.into_vk(),
+                    unnormalized_coordinates: false as u32,
+                    ..Default::default()
+                },
+                None,
+            )
+            .map(|handle| sampler::Sampler::from_handle_unchecked(handle))
+            .map_err(AllocationError::from_vk)
     }
     /// Create a pipeline cache, optionally populated with some data.
     ///
@@ -1498,7 +1594,7 @@ impl<'device> Device<'device> {
         MaybeInsideRender: CommandBufferState,
         SuperUsage: ImageSuperset<TransferDst>,
         Dim: Dimensionality,
-        Format: format::HasAspect<format::Color>,
+        Format: format::Format,
         Layout: layout::UsableAs<layout::TransferDst>,
     >(
         &'a self,
@@ -1507,7 +1603,7 @@ impl<'device> Device<'device> {
         // FIXME: DepthStencil needs a way to specify *which* of the two
         // aspects.
         image: &'_ ImageReference<'_, SuperUsage, Dim, Format, SingleSampled, Layout>,
-        regions: [BufferImageCopy<Dim>; N],
+        regions: [BufferImageCopy<Dim, Format::AspectMask>; N],
     ) -> &'a Self {
         self.0.cmd_copy_buffer_to_image(
             command_buffer.handle(),
@@ -1522,10 +1618,9 @@ impl<'device> Device<'device> {
                 // 0, convenient!
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
-                // FIXME: Aspect should be dynamic!
                 image_subresource: region
                     .layers
-                    .subresource_layers(vk::ImageAspectFlags::COLOR),
+                    .subresource_layers(format::aspect::AspectMask::aspect_mask(&region.aspects)),
             }),
         );
         self
@@ -1537,16 +1632,14 @@ impl<'device> Device<'device> {
         MaybeInsideRender: CommandBufferState,
         SuperUsage: ImageSuperset<TransferSrc>,
         Dim: Dimensionality,
-        Format: format::HasAspect<format::Color>,
+        Format: format::Format,
         Layout: layout::UsableAs<layout::TransferSrc>,
     >(
         &'a self,
         command_buffer: &'_ mut RecordingBuffer<Level, MaybeInsideRender>,
-        // FIXME: DepthStencil needs a way to specify *which* of the two
-        // aspects.
         image: &'_ ImageReference<'_, SuperUsage, Dim, Format, SingleSampled, Layout>,
         buffer: impl AsRef<Buffer<TransferDst>>,
-        regions: [BufferImageCopy<Dim>; N],
+        regions: [BufferImageCopy<Dim, Format::AspectMask>; N],
     ) -> &'a Self {
         self.0.cmd_copy_image_to_buffer(
             command_buffer.handle(),
@@ -1561,10 +1654,9 @@ impl<'device> Device<'device> {
                 // 0, convenient!
                 buffer_row_length: region.pitch.row_pitch().map(NonZero::get).unwrap_or(0),
                 buffer_image_height: region.pitch.slice_pitch().map(NonZero::get).unwrap_or(0),
-                // FIXME: Aspect should be dynamic!
                 image_subresource: region
                     .layers
-                    .subresource_layers(vk::ImageAspectFlags::COLOR),
+                    .subresource_layers(format::aspect::AspectMask::aspect_mask(&region.aspects)),
             }),
         );
         self

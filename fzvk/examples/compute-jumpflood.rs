@@ -230,7 +230,7 @@ pub fn main() -> Result<()> {
             // Check it has all the features we need:
             .filter(|&&phys| {
                 let r8unorm = ash_instance
-                    .get_physical_device_format_properties(phys, format::R8_UINT::FORMAT)
+                    .get_physical_device_format_properties(phys, format::R8u::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE);
@@ -238,7 +238,7 @@ pub fn main() -> Result<()> {
                     return false;
                 }
                 ash_instance
-                    .get_physical_device_format_properties(phys, format::R16G16_UINT::FORMAT)
+                    .get_physical_device_format_properties(phys, format::Rg16u::FORMAT)
                     .optimal_tiling_features
                     // TransferSrc/Dst is implicit. Weird.
                     .intersects(vk::FormatFeatureFlags::STORAGE_IMAGE)
@@ -300,7 +300,7 @@ pub fn main() -> Result<()> {
     let output_size_bytes = NonZero::new(
         u64::from(extent.width.get())
             * u64::from(extent.height.get())
-            * u64::from(format::R16G16_UINT::TEXEL_SIZE),
+            * u64::from(format::Rg16u::TEXEL_SIZE.get()),
     )
     .unwrap();
 
@@ -330,7 +330,7 @@ pub fn main() -> Result<()> {
             (TransferDst, Storage),
             extent,
             MipCount::ONE,
-            format::R8_UINT,
+            format::R8u,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
@@ -343,7 +343,7 @@ pub fn main() -> Result<()> {
             extent.with_layers(CreateArrayCount::TWO),
             MipCount::ONE,
             // Enough space to store a non-normalized UV coordinate.
-            format::R16G16_UINT,
+            format::Rg16u,
             SingleSampled,
             vk::ImageTiling::OPTIMAL,
             SharingMode::Exclusive,
@@ -394,6 +394,7 @@ pub fn main() -> Result<()> {
             D2,
             ComponentMapping::IDENTITY,
             SubresourceMips::ALL,
+            format::aspect::ViewAspects::<format::aspect::Color>::default(),
         )?;
         let pingpong_views = [
             device.create_image_view(
@@ -401,12 +402,14 @@ pub fn main() -> Result<()> {
                 D2,
                 ComponentMapping::IDENTITY,
                 SubresourceRange::range(.., 0..1),
+                Default::default(),
             )?,
             device.create_image_view(
                 &pingpong_array,
                 D2,
                 ComponentMapping::IDENTITY,
                 SubresourceRange::range(.., 1..2),
+                Default::default(),
             )?,
         ];
 
@@ -577,6 +580,7 @@ pub fn main() -> Result<()> {
                 image_extent: extent,
                 pitch: BufferPitch::PACKED,
                 layers: SubresourceMip::BASE_LEVEL,
+                aspects: format::aspect::AspectMask::ALL,
             }],
         );
         let _reference_image_ref = device
@@ -692,6 +696,7 @@ pub fn main() -> Result<()> {
                     image_extent: extent,
                     pitch: BufferPitch::PACKED,
                     layers: SubresourceLayers::new(0, readbuf as u32, NonZero::<u32>::MIN),
+                    aspects: format::aspect::AspectMask::ALL,
                 }],
             )
             .barrier(
